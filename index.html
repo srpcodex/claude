@@ -5,9 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Cosmos</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-  canvas { display: block; width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000;
+    touch-action: none;
+    overscroll-behavior: none;
+  }
+  canvas { display: block; width: 100%; height: 100%; position: absolute; top: 0; left: 0;
+    touch-action: none;
+  }
   #overlay {
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     pointer-events: none; z-index: 10;
@@ -26,6 +38,7 @@
     font-size: 14px; font-weight: 300; letter-spacing: 2px;
     color: rgba(255,255,255,0.4);
     transition: opacity 1.5s ease-out;
+    white-space: nowrap;
   }
   #hint.hidden { opacity: 0; }
   #fade {
@@ -50,12 +63,19 @@
 // Canvas 2D version — maximum compatibility
 // ============================================================
 
+// Prevent all context menus and selection on mobile
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('selectstart', e => e.preventDefault());
+document.addEventListener('touchstart', e => { if (e.target === canvas) e.preventDefault(); }, { passive: false });
+document.addEventListener('touchmove', e => { if (e.target === canvas) e.preventDefault(); }, { passive: false });
+document.addEventListener('touchend', e => { if (e.target === canvas) e.preventDefault(); }, { passive: false });
+
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
 // --- Configuration ---
 const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1);
-const NUM_PARTICLES = isMobile ? 15000 : 40000;
+const NUM_PARTICLES = isMobile ? 50000 : 120000;
 const MAX_ATTRACTORS = 4;
 let dpr = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -96,7 +116,6 @@ const vy = new Float32Array(NUM_PARTICLES);
 const vz = new Float32Array(NUM_PARTICLES);
 const age = new Float32Array(NUM_PARTICLES);
 const lifetime = new Float32Array(NUM_PARTICLES);
-const baseR = new Float32Array(NUM_PARTICLES); // base radius for orbit
 
 // Target positions for intro animation
 const targetX = new Float32Array(NUM_PARTICLES);
@@ -104,36 +123,35 @@ const targetY = new Float32Array(NUM_PARTICLES);
 const targetZ = new Float32Array(NUM_PARTICLES);
 
 function initParticles() {
-  const numArms = 3;
+  const numArms = 4;
   for (let i = 0; i < NUM_PARTICLES; i++) {
     const arm = i % numArms;
     const armAngle = (arm / numArms) * Math.PI * 2;
-    const t = Math.random();
-    const r = 0.1 + t * 2.8;
-    const spiralAngle = armAngle + Math.log(r + 1) * 2.5;
-    const spread = (1.0 - t * 0.5) * 0.7;
+    const t = Math.pow(Math.random(), 0.6); // bias toward center for density
+    const r = 0.05 + t * 4.0; // larger galaxy radius
+    const spiralAngle = armAngle + Math.log(r + 1) * 3.0;
+    const spread = (1.0 - t * 0.4) * 0.9;
     const angle = spiralAngle + (Math.random() - 0.5) * spread;
 
     // Target galaxy position
-    targetX[i] = Math.cos(angle) * r + (Math.random() - 0.5) * 0.15;
-    targetY[i] = Math.sin(angle) * r + (Math.random() - 0.5) * 0.15;
-    targetZ[i] = (Math.random() - 0.5) * 0.2 * (1.0 + r * 0.05);
+    targetX[i] = Math.cos(angle) * r + (Math.random() - 0.5) * 0.2;
+    targetY[i] = Math.sin(angle) * r + (Math.random() - 0.5) * 0.2;
+    targetZ[i] = (Math.random() - 0.5) * 0.3 * (1.0 + r * 0.08);
 
     // Start scattered
-    const scatter = 4.0;
+    const scatter = 5.0;
     px[i] = targetX[i] + (Math.random() - 0.5) * scatter;
     py[i] = targetY[i] + (Math.random() - 0.5) * scatter;
     pz[i] = targetZ[i] + (Math.random() - 0.5) * scatter * 0.3;
 
     // Tangential velocity
-    const speed = 0.15 + Math.random() * 0.1;
+    const speed = 0.2 + Math.random() * 0.15;
     vx[i] = -Math.sin(angle) * speed;
     vy[i] = Math.cos(angle) * speed;
     vz[i] = (Math.random() - 0.5) * 0.02;
 
     age[i] = Math.random() * 12.0;
     lifetime[i] = 6.0 + Math.random() * 10.0;
-    baseR[i] = r;
   }
 }
 initParticles();
@@ -144,9 +162,29 @@ function noise3d(x, y, z) {
   return n - Math.floor(n);
 }
 
-// --- Input ---
-function screenToWorld(sx, sy) {
-  return [(sx / cssW) * 2 - 1, -((sy / cssH) * 2 - 1)];
+// --- Input: convert screen touch to world-space attractor position ---
+// This must match the projection used in rendering exactly.
+function screenToWorld(clientX, clientY) {
+  // The renderer projects world (rx, ry) to screen as:
+  //   sx_canvas = cx + rx * scale * projScale
+  //   sy_canvas = cy - ry * scale * projScale
+  // where projScale = camDist / depth, depth = rz + camDist
+  // For attractor at z=0 (rz=0 after camera rotation):
+  //   depth = camDist, projScale = 1.0
+  // So: rx = (sx_canvas - cx) / scale
+  //     ry = -(sy_canvas - cy) / scale
+
+  const cx = width / 2;
+  const cy = height / 2;
+  const scale = Math.min(width, height) * 0.18;
+
+  // Convert client coords to canvas pixel coords
+  const canvasX = clientX * dpr;
+  const canvasY = clientY * dpr;
+
+  const wx = (canvasX - cx) / scale;
+  const wy = -(canvasY - cy) / scale;
+  return [wx, wy];
 }
 
 canvas.addEventListener('pointerdown', (e) => {
@@ -159,7 +197,7 @@ canvas.addEventListener('pointerdown', (e) => {
   for (let i = 0; i < MAX_ATTRACTORS; i++) {
     if (attractors[i].id === -1) {
       const [wx, wy] = screenToWorld(e.clientX, e.clientY);
-      attractors[i] = { x: wx * 3.5, y: wy * 3.5, strength: 1.0, id: e.pointerId };
+      attractors[i] = { x: wx, y: wy, strength: 1.0, id: e.pointerId };
       break;
     }
   }
@@ -171,8 +209,8 @@ canvas.addEventListener('pointermove', (e) => {
   for (let i = 0; i < MAX_ATTRACTORS; i++) {
     if (attractors[i].id === e.pointerId) {
       const [wx, wy] = screenToWorld(e.clientX, e.clientY);
-      attractors[i].x = wx * 3.5;
-      attractors[i].y = wy * 3.5;
+      attractors[i].x = wx;
+      attractors[i].y = wy;
       break;
     }
   }
@@ -191,26 +229,25 @@ canvas.addEventListener('pointerup', releasePointer);
 canvas.addEventListener('pointercancel', releasePointer);
 canvas.style.touchAction = 'none';
 
-// --- Color palette ---
+// --- Color palette (brighter, more vivid) ---
 function nebulaPalette(t, hueShift) {
-  // t: 0-1, hueShift: 0-1
   t = Math.max(0, Math.min(1, t));
   let r, g, b;
-  if (t < 0.25) {
-    const s = t / 0.25;
-    r = 0.05 + s * 0.0;  g = 0.01 + s * 0.15;  b = 0.15 + s * 0.45;
-  } else if (t < 0.5) {
-    const s = (t - 0.25) / 0.25;
-    r = 0.05 + s * 0.35;  g = 0.16 + s * 0.2;  b = 0.6 + s * (-0.1);
-  } else if (t < 0.75) {
-    const s = (t - 0.5) / 0.25;
-    r = 0.4 + s * 0.5;  g = 0.36 + s * 0.1;  b = 0.5 - s * 0.3;
+  if (t < 0.2) {
+    const s = t / 0.2;
+    r = 0.15 + s * 0.1;  g = 0.05 + s * 0.3;  b = 0.4 + s * 0.4;
+  } else if (t < 0.45) {
+    const s = (t - 0.2) / 0.25;
+    r = 0.25 + s * 0.4;  g = 0.35 + s * 0.15;  b = 0.8 - s * 0.1;
+  } else if (t < 0.7) {
+    const s = (t - 0.45) / 0.25;
+    r = 0.65 + s * 0.3;  g = 0.5 + s * 0.15;  b = 0.7 - s * 0.35;
   } else {
-    const s = (t - 0.75) / 0.25;
-    r = 0.9 + s * 0.1;  g = 0.46 + s * 0.44;  b = 0.2 + s * 0.6;
+    const s = (t - 0.7) / 0.3;
+    r = 0.95 + s * 0.05;  g = 0.65 + s * 0.3;  b = 0.35 + s * 0.55;
   }
 
-  // Rotate hue slightly
+  // Rotate hue
   const angle = hueShift * Math.PI * 2;
   const cos = Math.cos(angle), sin = Math.sin(angle);
   const nr = r * (0.7 + 0.3 * cos) + g * 0.3 * sin;
@@ -245,9 +282,14 @@ window.addEventListener('resize', () => {
   setupGlow();
 });
 
-// --- Sort buffer for depth sorting ---
-const sortIndices = new Uint32Array(NUM_PARTICLES);
-const sortDepths = new Float32Array(NUM_PARTICLES);
+// --- Use ImageData for fast pixel rendering ---
+let imgData, pixels;
+function setupImageData() {
+  imgData = ctx.createImageData(width, height);
+  pixels = new Uint32Array(imgData.data.buffer);
+}
+setupImageData();
+window.addEventListener('resize', setupImageData);
 
 // --- Render Loop ---
 function frame(now) {
@@ -277,6 +319,7 @@ function frame(now) {
   // Camera
   const cosA = Math.cos(cameraAngle);
   const sinA = Math.sin(cameraAngle);
+  const camDist = 6.0;
 
   // --- Physics Update ---
   for (let i = 0; i < NUM_PARTICLES; i++) {
@@ -317,7 +360,7 @@ function frame(now) {
       if (a.strength > 0.01) {
         const adx = a.x - x, ady = a.y - y;
         const aDist = Math.sqrt(adx * adx + ady * ady) + 0.01;
-        const aForce = a.strength * 5.0 / (aDist * aDist + 0.3);
+        const aForce = a.strength * 6.0 / (aDist * aDist + 0.3);
         _vx += (adx / aDist) * aForce * dt;
         _vy += (ady / aDist) * aForce * dt;
         // Swirl
@@ -341,8 +384,8 @@ function frame(now) {
 
     // Speed limit
     const speed = Math.sqrt(_vx * _vx + _vy * _vy + _vz * _vz);
-    if (speed > 2.0) {
-      const s = 2.0 / speed;
+    if (speed > 2.5) {
+      const s = 2.5 / speed;
       _vx *= s; _vy *= s; _vz *= s;
     }
 
@@ -350,10 +393,10 @@ function frame(now) {
     y += _vy * dt;
     z += _vz * dt;
 
-    // Soft boundary
+    // Soft boundary (larger)
     const r = Math.sqrt(x * x + y * y + z * z);
-    if (r > 5.0) {
-      const s = 5.0 / r;
+    if (r > 7.0) {
+      const s = 7.0 / r;
       x *= s; y *= s; z *= s;
       _vx *= -0.2; _vy *= -0.2; _vz *= -0.2;
     }
@@ -362,36 +405,18 @@ function frame(now) {
     vx[i] = _vx; vy[i] = _vy; vz[i] = _vz;
   }
 
-  // --- Render ---
+  // --- Render via ImageData for speed ---
   const cx = width / 2;
   const cy = height / 2;
-  const scale = Math.min(width, height) * 0.12;
+  const scale = Math.min(width, height) * 0.18; // bigger galaxy on screen
   const hueShift = (time * 0.016) % 1.0;
 
-  // Clear main canvas
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = 'rgba(2, 1, 8, 1)';
-  ctx.fillRect(0, 0, width, height);
-
-  // Clear glow canvas
-  glowCtx.clearRect(0, 0, glowCanvas.width, glowCanvas.height);
-  const gScale = glowCanvas.width / width;
-
-  // Compute projected positions and sort by depth
-  for (let i = 0; i < NUM_PARTICLES; i++) {
-    // Rotate by camera
-    const rx = px[i] * cosA - pz[i] * sinA;
-    const rz = px[i] * sinA + pz[i] * cosA;
-    sortDepths[i] = rz;
-    sortIndices[i] = i;
+  // Clear pixel buffer to near-black
+  for (let i = 0; i < pixels.length; i++) {
+    pixels[i] = 0xFF080210; // ABGR: alpha=FF, B=08, G=02, R=10 → dark purple-black
   }
 
-  // We'll skip full sort for performance — just render with additive blending
-  // which looks correct regardless of order
-
-  // Draw particles
-  ctx.globalCompositeOperation = 'lighter'; // additive blending!
-
+  // Draw particles directly into pixel buffer (fastest possible)
   for (let i = 0; i < NUM_PARTICLES; i++) {
     const x = px[i], y = py[i], z = pz[i];
 
@@ -401,67 +426,113 @@ function frame(now) {
     const rz = x * sinA + z * cosA;
 
     // Perspective projection
-    const depth = rz + 6.0; // camera at z=6
+    const depth = rz + camDist;
     if (depth < 0.1) continue;
-    const projScale = 4.0 / depth;
-    const sx = cx + rx * scale * projScale;
-    const sy = cy - ry * scale * projScale;
+    const projScale = camDist / depth;
+    const sx = (cx + rx * scale * projScale) | 0;
+    const sy = (cy - ry * scale * projScale) | 0;
 
-    // Off-screen culling
-    if (sx < -10 || sx > width + 10 || sy < -10 || sy > height + 10) continue;
+    // Bounds check
+    if (sx < 1 || sx >= width - 1 || sy < 1 || sy >= height - 1) continue;
 
     // Age fade
     const ageFrac = age[i] / lifetime[i];
-    const fadeMask = smoothstep(ageFrac * 10.0) * smoothstep((1.0 - ageFrac) * 5.0);
+    const fadeMask = smoothstep(ageFrac * 8.0) * smoothstep((1.0 - ageFrac) * 4.0);
 
     // Speed-based color
     const spd = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]);
-    const colorT = Math.min(1, spd * 0.5 + (1.0 / depth) * 0.3);
+    const colorT = Math.min(1, spd * 0.4 + (1.0 / depth) * 0.5);
     const [cr, cg, cb] = nebulaPalette(colorT, hueShift);
 
     // Depth fog
-    const fog = Math.exp(-depth * 0.06);
-    const alpha = fadeMask * fog * (0.3 + spd * 0.2) * projScale * 0.5;
+    const fog = Math.exp(-depth * 0.04);
 
-    if (alpha < 0.01) continue;
+    // Much brighter base alpha
+    const alpha = fadeMask * fog * (0.6 + spd * 0.4) * projScale;
 
-    // Size
-    const size = Math.max(0.5, projScale * (0.8 + spd * 0.3)) * dpr;
+    if (alpha < 0.02) continue;
 
-    // Draw on main canvas
     const a = Math.min(1, alpha);
-    ctx.fillStyle = `rgba(${cr|0},${cg|0},${cb|0},${a.toFixed(3)})`;
-    ctx.fillRect(sx - size * 0.5, sy - size * 0.5, size, size);
+    const ir = (cr * a) | 0;
+    const ig = (cg * a) | 0;
+    const ib = (cb * a) | 0;
 
-    // Draw bright particles on glow canvas too
-    if (alpha > 0.15) {
-      const ga = Math.min(1, alpha * 1.5);
-      glowCtx.fillStyle = `rgba(${cr|0},${cg|0},${cb|0},${ga.toFixed(3)})`;
-      const gs = size * gScale * 2;
-      glowCtx.fillRect(sx * gScale - gs * 0.5, sy * gScale - gs * 0.5, gs, gs);
+    // Additive blend into pixel buffer — write a 2x2 block for brighter, fatter stars
+    const size = projScale > 0.8 ? 2 : 1;
+
+    if (size === 2) {
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const pi = (sy + dy) * width + (sx + dx);
+          const existing = pixels[pi];
+          const er = existing & 0xFF;
+          const eg = (existing >> 8) & 0xFF;
+          const eb = (existing >> 16) & 0xFF;
+          const nr = Math.min(255, er + ir);
+          const ng = Math.min(255, eg + ig);
+          const nb = Math.min(255, eb + ib);
+          pixels[pi] = 0xFF000000 | (nb << 16) | (ng << 8) | nr;
+        }
+      }
+    } else {
+      const pi = sy * width + sx;
+      const existing = pixels[pi];
+      const er = existing & 0xFF;
+      const eg = (existing >> 8) & 0xFF;
+      const eb = (existing >> 16) & 0xFF;
+      const nr = Math.min(255, er + ir);
+      const ng = Math.min(255, eg + ig);
+      const nb = Math.min(255, eb + ib);
+      pixels[pi] = 0xFF000000 | (nb << 16) | (ng << 8) | nr;
+    }
+
+    // Extra bright core for fast/close particles
+    if (alpha > 0.5 && size === 2) {
+      const pi = sy * width + sx;
+      const existing = pixels[pi];
+      const er = existing & 0xFF;
+      const eg = (existing >> 8) & 0xFF;
+      const eb = (existing >> 16) & 0xFF;
+      const boost = (alpha * 0.5) | 0;
+      const nr2 = Math.min(255, er + ir + boost * 2);
+      const ng2 = Math.min(255, eg + ig + boost * 2);
+      const nb2 = Math.min(255, eb + ib + boost);
+      pixels[pi] = 0xFF000000 | (nb2 << 16) | (ng2 << 8) | nr2;
     }
   }
 
-  // --- Apply bloom/glow ---
-  // Draw blurred glow canvas over main with additive blend
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.filter = `blur(${Math.max(4, 8 * dpr)}px)`;
-  ctx.globalAlpha = 0.6;
-  ctx.drawImage(glowCanvas, 0, 0, width, height);
-  ctx.filter = 'none';
+  // Put pixels to main canvas
+  ctx.putImageData(imgData, 0, 0);
 
-  // Second wider glow pass
-  ctx.globalAlpha = 0.3;
-  ctx.filter = `blur(${Math.max(8, 16 * dpr)}px)`;
+  // --- Glow pass: draw bright areas to glow canvas, then blur ---
+  const gW = glowCanvas.width;
+  const gH = glowCanvas.height;
+  const gScaleX = gW / width;
+  const gScaleY = gH / height;
+
+  // Copy downscaled version to glow canvas
+  glowCtx.clearRect(0, 0, gW, gH);
+  glowCtx.drawImage(canvas, 0, 0, gW, gH);
+
+  // Composite blurred glow back additively
+  ctx.globalCompositeOperation = 'lighter';
+
+  ctx.filter = `blur(${Math.max(6, 12 * dpr)}px)`;
+  ctx.globalAlpha = 0.7;
   ctx.drawImage(glowCanvas, 0, 0, width, height);
+
+  ctx.filter = `blur(${Math.max(12, 24 * dpr)}px)`;
+  ctx.globalAlpha = 0.4;
+  ctx.drawImage(glowCanvas, 0, 0, width, height);
+
   ctx.filter = 'none';
   ctx.globalAlpha = 1.0;
+  ctx.globalCompositeOperation = 'source-over';
 
   // Vignette
-  ctx.globalCompositeOperation = 'source-over';
-  const vignette = ctx.createRadialGradient(cx, cy, Math.min(width, height) * 0.2, cx, cy, Math.max(width, height) * 0.7);
+  const vignette = ctx.createRadialGradient(cx, cy, Math.min(width, height) * 0.25, cx, cy, Math.max(width, height) * 0.75);
   vignette.addColorStop(0, 'rgba(0,0,0,0)');
-  vignette.addColorStop(1, 'rgba(0,0,0,0.5)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.45)');
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, width, height);
 }
