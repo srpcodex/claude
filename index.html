@@ -7,7 +7,7 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-  canvas { display: block; width: 100%; height: 100%; }
+  canvas { display: block; width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
   #overlay {
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     pointer-events: none; z-index: 10;
@@ -47,599 +47,106 @@
 <script>
 // ============================================================
 // COSMOS — Interactive Particle Galaxy
-// A single-file WebGL2 generative art experience
+// Canvas 2D version — maximum compatibility
 // ============================================================
 
 const canvas = document.getElementById('c');
-const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, powerPreference: 'high-performance' });
-
-if (!gl) {
-  document.body.innerHTML = '<div style="color:#fff;padding:40px;font-family:sans-serif">WebGL2 is required. Please use a modern browser.</div>';
-  throw new Error('WebGL2 not supported');
-}
+const ctx = canvas.getContext('2d');
 
 // --- Configuration ---
 const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1);
-const NUM_PARTICLES = isMobile ? 80000 : 200000;
-const BLOOM_SCALE = 0.25;
+const NUM_PARTICLES = isMobile ? 15000 : 40000;
 const MAX_ATTRACTORS = 4;
 let dpr = Math.min(window.devicePixelRatio || 1, 2);
 
 // --- State ---
-let width, height;
+let width, height, cssW, cssH;
 let time = 0;
 let lastTime = 0;
 let introProgress = 0;
 let idleTime = 0;
 let cameraAngle = 0;
-let cameraTiltX = 0, cameraTiltY = 0;
 let hintHidden = false;
 
 const attractors = [];
 for (let i = 0; i < MAX_ATTRACTORS; i++) {
-  attractors.push({ x: 0, y: 0, z: 0, strength: 0, id: -1 });
-}
-
-// --- Shader Sources ---
-const SIMPLEX_NOISE_GLSL = `
-vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec4 permute(vec4 x){return mod289(((x*34.0)+1.0)*x);}
-vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
-float snoise(vec3 v){
-  const vec2 C=vec2(1.0/6.0,1.0/3.0);
-  const vec4 D=vec4(0.0,0.5,1.0,2.0);
-  vec3 i=floor(v+dot(v,C.yyy));
-  vec3 x0=v-i+dot(i,C.xxx);
-  vec3 g=step(x0.yzx,x0.xyz);
-  vec3 l=1.0-g;
-  vec3 i1=min(g.xyz,l.zxy);
-  vec3 i2=max(g.xyz,l.zxy);
-  vec3 x1=x0-i1+C.xxx;
-  vec3 x2=x0-i2+C.yyy;
-  vec3 x3=x0-D.yyy;
-  i=mod289(i);
-  vec4 p=permute(permute(permute(
-    i.z+vec4(0.0,i1.z,i2.z,1.0))
-    +i.y+vec4(0.0,i1.y,i2.y,1.0))
-    +i.x+vec4(0.0,i1.x,i2.x,1.0));
-  float n_=0.142857142857;
-  vec3 ns=n_*D.wyz-D.xzx;
-  vec4 j=p-49.0*floor(p*ns.z*ns.z);
-  vec4 x_=floor(j*ns.z);
-  vec4 y_=floor(j-7.0*x_);
-  vec4 x=x_*ns.x+ns.yyyy;
-  vec4 y=y_*ns.x+ns.yyyy;
-  vec4 h=1.0-abs(x)-abs(y);
-  vec4 b0=vec4(x.xy,y.xy);
-  vec4 b1=vec4(x.zw,y.zw);
-  vec4 s0=floor(b0)*2.0+1.0;
-  vec4 s1=floor(b1)*2.0+1.0;
-  vec4 sh=-step(h,vec4(0.0));
-  vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy;
-  vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
-  vec3 p0=vec3(a0.xy,h.x);
-  vec3 p1=vec3(a0.zw,h.y);
-  vec3 p2=vec3(a1.xy,h.z);
-  vec3 p3=vec3(a1.zw,h.w);
-  vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
-  p0*=norm.x;p1*=norm.y;p2*=norm.z;p3*=norm.w;
-  vec4 m=max(0.6-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0);
-  m=m*m;
-  return 42.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
-}
-vec3 curlNoise(vec3 p){
-  float e=0.1;
-  float n1,n2;
-  vec3 c;
-  n1=snoise(p+vec3(0,e,0));n2=snoise(p-vec3(0,e,0));
-  float a=n1-n2;
-  n1=snoise(p+vec3(0,0,e));n2=snoise(p-vec3(0,0,e));
-  float b=n1-n2;
-  c.x=a-b;
-  n1=snoise(p+vec3(0,0,e));n2=snoise(p-vec3(0,0,e));
-  a=n1-n2;
-  n1=snoise(p+vec3(e,0,0));n2=snoise(p-vec3(e,0,0));
-  b=n1-n2;
-  c.y=a-b;
-  n1=snoise(p+vec3(e,0,0));n2=snoise(p-vec3(e,0,0));
-  a=n1-n2;
-  n1=snoise(p+vec3(0,e,0));n2=snoise(p-vec3(0,e,0));
-  b=n1-n2;
-  c.z=a-b;
-  return c/(2.0*e);
-}
-`;
-
-const simVertSrc = `#version 300 es
-precision highp float;
-in vec4 a_pos;  // xyz = position, w = age
-in vec4 a_vel;  // xyz = velocity, w = lifetime
-
-uniform float u_dt;
-uniform float u_time;
-uniform float u_introProgress;
-uniform vec4 u_attractors[${MAX_ATTRACTORS}]; // xyz = position, w = strength
-
-out vec4 v_pos;
-out vec4 v_vel;
-
-${SIMPLEX_NOISE_GLSL}
-
-void main() {
-  vec3 pos = a_pos.xyz;
-  float age = a_pos.w;
-  vec3 vel = a_vel.xyz;
-  float lifetime = a_vel.w;
-
-  age += u_dt;
-
-  // Respawn
-  if (age > lifetime) {
-    age = 0.0;
-  }
-
-  // Galaxy center gravity
-  vec3 toCenter = -pos;
-  float dist = length(toCenter);
-  if (dist > 0.01) {
-    vec3 dir = toCenter / dist;
-    // Centripetal force
-    float gravStr = 0.8 / (dist * 0.5 + 0.1);
-    vel += dir * gravStr * u_dt;
-    // Tangential (orbital) velocity
-    vec3 tangent = normalize(cross(dir, vec3(0.0, 0.0, 1.0)));
-    float orbitalSpeed = sqrt(gravStr * dist) * 0.5;
-    vel += tangent * orbitalSpeed * u_dt * 0.3;
-  }
-
-  // Curl noise turbulence
-  vec3 noisePos = pos * 0.3 + u_time * 0.05;
-  vec3 curl = curlNoise(noisePos);
-  vel += curl * 0.15 * u_dt;
-
-  // Attractors (touch/mouse gravity wells)
-  for (int i = 0; i < ${MAX_ATTRACTORS}; i++) {
-    float str = u_attractors[i].w;
-    if (str > 0.01) {
-      vec3 aPos = u_attractors[i].xyz;
-      vec3 toA = aPos - pos;
-      float aDist = length(toA);
-      if (aDist > 0.05) {
-        vec3 aDir = toA / aDist;
-        float aForce = str * 8.0 / (aDist * aDist + 0.5);
-        vel += aDir * aForce * u_dt;
-        // Swirl around attractor
-        vec3 aTangent = normalize(cross(aDir, vec3(0.0, 0.0, 1.0)));
-        vel += aTangent * aForce * 0.4 * u_dt;
-      }
-    }
-  }
-
-  // Intro: lerp from scattered to orbiting
-  if (u_introProgress < 1.0) {
-    vel *= mix(0.85, 1.0, u_introProgress);
-  }
-
-  // Damping
-  vel *= 0.995;
-
-  // Clamp velocity
-  float speed = length(vel);
-  if (speed > 3.0) vel = vel / speed * 3.0;
-
-  pos += vel * u_dt;
-
-  // Soft boundary
-  float r = length(pos);
-  if (r > 8.0) {
-    pos *= 8.0 / r;
-    vel *= -0.2;
-  }
-
-  v_pos = vec4(pos, age);
-  v_vel = vec4(vel, lifetime);
-}
-`;
-
-const simFragSrc = `#version 300 es
-precision lowp float;
-void main() { discard; }
-`;
-
-const renderVertSrc = `#version 300 es
-precision highp float;
-in vec4 a_pos;
-in vec4 a_vel;
-
-uniform mat4 u_projView;
-uniform float u_time;
-uniform float u_pointScale;
-
-out float v_age;
-out float v_lifetime;
-out float v_speed;
-out float v_depth;
-out vec3 v_pos;
-
-void main() {
-  vec3 pos = a_pos.xyz;
-  float age = a_pos.w;
-  float lifetime = a_vel.w;
-  float speed = length(a_vel.xyz);
-
-  vec4 clipPos = u_projView * vec4(pos, 1.0);
-  gl_Position = clipPos;
-
-  float dist = clipPos.w;
-  float sizeFalloff = u_pointScale / (dist + 0.5);
-
-  // Age-based fade
-  float ageFrac = age / lifetime;
-  float fadeMask = smoothstep(0.0, 0.1, ageFrac) * smoothstep(1.0, 0.8, ageFrac);
-
-  gl_PointSize = max(1.0, sizeFalloff * (1.0 + speed * 0.5) * fadeMask);
-
-  v_age = ageFrac;
-  v_lifetime = lifetime;
-  v_speed = speed;
-  v_depth = dist;
-  v_pos = pos;
-}
-`;
-
-const renderFragSrc = `#version 300 es
-precision mediump float;
-
-in float v_age;
-in float v_lifetime;
-in float v_speed;
-in float v_depth;
-in vec3 v_pos;
-
-uniform float u_time;
-
-out vec4 fragColor;
-
-vec3 palette(float t, float hueShift) {
-  // Nebula palette
-  vec3 cold   = vec3(0.1, 0.02, 0.2);   // deep purple
-  vec3 cool   = vec3(0.0, 0.5, 0.8);    // cyan
-  vec3 warm   = vec3(1.0, 0.42, 0.21);  // orange
-  vec3 hot    = vec3(1.0, 0.95, 0.85);  // white-gold
-
-  // Rotate hue over time
-  float angle = hueShift * 6.28318;
-  mat3 rot = mat3(
-    cos(angle), -sin(angle), 0.0,
-    sin(angle),  cos(angle), 0.0,
-    0.0,         0.0,        1.0
-  );
-
-  vec3 c;
-  if (t < 0.33) c = mix(cold, cool, t / 0.33);
-  else if (t < 0.66) c = mix(cool, warm, (t - 0.33) / 0.33);
-  else c = mix(warm, hot, (t - 0.66) / 0.34);
-
-  c = rot * c;
-  return max(c, 0.0);
-}
-
-void main() {
-  vec2 pc = gl_PointCoord * 2.0 - 1.0;
-  float d = dot(pc, pc);
-  if (d > 1.0) discard;
-
-  float glow = exp(-d * 3.0);
-  float fadeMask = smoothstep(0.0, 0.1, v_age) * smoothstep(1.0, 0.8, v_age);
-
-  float colorT = v_speed * 0.3 + v_depth * 0.02;
-  colorT = clamp(colorT, 0.0, 1.0);
-
-  float hueShift = u_time * 0.016; // full cycle ~60s
-  vec3 color = palette(colorT, hueShift);
-
-  // Depth fog — far particles dimmer and bluer
-  float fog = exp(-v_depth * 0.08);
-  color = mix(vec3(0.05, 0.02, 0.15), color, fog);
-
-  float alpha = glow * fadeMask * (0.4 + v_speed * 0.15);
-  alpha *= fog;
-
-  fragColor = vec4(color * alpha, alpha);
-}
-`;
-
-const bloomFragSrc = `#version 300 es
-precision mediump float;
-uniform sampler2D u_tex;
-uniform vec2 u_dir;
-uniform vec2 u_resolution;
-out vec4 fragColor;
-
-void main() {
-  vec2 uv = gl_FragCoord.xy / u_resolution;
-  vec2 texel = u_dir / u_resolution;
-  vec4 sum = vec4(0.0);
-  sum += texture(u_tex, uv - 4.0*texel) * 0.0162;
-  sum += texture(u_tex, uv - 3.0*texel) * 0.0540;
-  sum += texture(u_tex, uv - 2.0*texel) * 0.1218;
-  sum += texture(u_tex, uv - 1.0*texel) * 0.1954;
-  sum += texture(u_tex, uv)              * 0.2252;
-  sum += texture(u_tex, uv + 1.0*texel) * 0.1954;
-  sum += texture(u_tex, uv + 2.0*texel) * 0.1218;
-  sum += texture(u_tex, uv + 3.0*texel) * 0.0540;
-  sum += texture(u_tex, uv + 4.0*texel) * 0.0162;
-  fragColor = sum;
-}
-`;
-
-const compositeVertSrc = `#version 300 es
-in vec2 a_pos;
-out vec2 v_uv;
-void main() {
-  v_uv = a_pos * 0.5 + 0.5;
-  gl_Position = vec4(a_pos, 0.0, 1.0);
-}
-`;
-
-const compositeFragSrc = `#version 300 es
-precision mediump float;
-uniform sampler2D u_scene;
-uniform sampler2D u_bloom;
-uniform float u_bloomStrength;
-in vec2 v_uv;
-out vec4 fragColor;
-
-void main() {
-  vec4 scene = texture(u_scene, v_uv);
-  vec4 bloom = texture(u_bloom, v_uv);
-  // Additive bloom
-  vec3 color = scene.rgb + bloom.rgb * u_bloomStrength;
-  // Subtle vignette
-  float vig = 1.0 - dot(v_uv - 0.5, v_uv - 0.5) * 1.2;
-  color *= clamp(vig, 0.0, 1.0);
-  // Tone mapping
-  color = color / (color + 1.0);
-  // Gamma
-  color = pow(color, vec3(1.0/2.2));
-  fragColor = vec4(color, 1.0);
-}
-`;
-
-// --- WebGL Helpers ---
-function compileShader(type, src) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    console.error('Shader error:', gl.getShaderInfoLog(s));
-    console.error(src);
-  }
-  return s;
-}
-
-function createProgram(vs, fs, tfVaryings) {
-  const p = gl.createProgram();
-  gl.attachShader(p, compileShader(gl.VERTEX_SHADER, vs));
-  gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, fs));
-  if (tfVaryings) {
-    gl.transformFeedbackVaryings(p, tfVaryings, gl.SEPARATE_ATTRIBS);
-  }
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-    console.error('Program error:', gl.getProgramInfoLog(p));
-  }
-  return p;
-}
-
-function getUniforms(prog, names) {
-  const u = {};
-  for (const n of names) u[n] = gl.getUniformLocation(prog, n);
-  return u;
-}
-
-// --- Programs ---
-const simProg = createProgram(simVertSrc, simFragSrc, ['v_pos', 'v_vel']);
-const simU = getUniforms(simProg, ['u_dt', 'u_time', 'u_introProgress', 'u_attractors[0]', 'u_attractors[1]', 'u_attractors[2]', 'u_attractors[3]']);
-
-const renderProg = createProgram(renderVertSrc, renderFragSrc);
-const renderU = getUniforms(renderProg, ['u_projView', 'u_time', 'u_pointScale']);
-
-const bloomProg = createProgram(compositeVertSrc, bloomFragSrc);
-const bloomU = getUniforms(bloomProg, ['u_tex', 'u_dir', 'u_resolution']);
-
-const compositeProg = createProgram(compositeVertSrc, compositeFragSrc);
-const compositeU = getUniforms(compositeProg, ['u_scene', 'u_bloom', 'u_bloomStrength']);
-
-// --- Particle Initialization ---
-function initParticles() {
-  const pos = new Float32Array(NUM_PARTICLES * 4);
-  const vel = new Float32Array(NUM_PARTICLES * 4);
-  const numArms = 3;
-
-  for (let i = 0; i < NUM_PARTICLES; i++) {
-    const idx = i * 4;
-
-    // Logarithmic spiral arm distribution
-    const arm = i % numArms;
-    const armAngle = (arm / numArms) * Math.PI * 2;
-
-    const t = Math.random();
-    const r = 0.2 + t * 5.5; // radius
-    const spiralAngle = armAngle + Math.log(r + 1) * 2.5;
-
-    // Add spread
-    const spread = (1.0 - t * 0.5) * 0.8;
-    const angle = spiralAngle + (Math.random() - 0.5) * spread;
-
-    const x = Math.cos(angle) * r + (Math.random() - 0.5) * 0.3;
-    const y = Math.sin(angle) * r + (Math.random() - 0.5) * 0.3;
-    const z = (Math.random() - 0.5) * 0.5 * (1.0 + r * 0.1);
-
-    // Start scattered for intro
-    const scatter = 3.0;
-    pos[idx]     = x + (Math.random() - 0.5) * scatter;
-    pos[idx + 1] = y + (Math.random() - 0.5) * scatter;
-    pos[idx + 2] = z + (Math.random() - 0.5) * scatter * 0.5;
-    pos[idx + 3] = Math.random() * 15.0; // age (random start so not all same phase)
-
-    // Tangential velocity
-    const speed = 0.3 + Math.random() * 0.2;
-    vel[idx]     = -Math.sin(angle) * speed;
-    vel[idx + 1] =  Math.cos(angle) * speed;
-    vel[idx + 2] = (Math.random() - 0.5) * 0.05;
-    vel[idx + 3] = 8.0 + Math.random() * 12.0; // lifetime
-  }
-
-  return { pos, vel };
-}
-
-// --- Buffers ---
-const { pos: initPos, vel: initVel } = initParticles();
-
-const posBuffers = [gl.createBuffer(), gl.createBuffer()];
-const velBuffers = [gl.createBuffer(), gl.createBuffer()];
-
-for (let i = 0; i < 2; i++) {
-  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffers[i]);
-  gl.bufferData(gl.ARRAY_BUFFER, initPos, gl.DYNAMIC_COPY);
-  gl.bindBuffer(gl.ARRAY_BUFFER, velBuffers[i]);
-  gl.bufferData(gl.ARRAY_BUFFER, initVel, gl.DYNAMIC_COPY);
-}
-
-// VAOs for simulation
-const simVAOs = [gl.createVertexArray(), gl.createVertexArray()];
-for (let i = 0; i < 2; i++) {
-  gl.bindVertexArray(simVAOs[i]);
-  const posLoc = gl.getAttribLocation(simProg, 'a_pos');
-  const velLoc = gl.getAttribLocation(simProg, 'a_vel');
-  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffers[i]);
-  gl.enableVertexAttribArray(posLoc);
-  gl.vertexAttribPointer(posLoc, 4, gl.FLOAT, false, 0, 0);
-  gl.bindBuffer(gl.ARRAY_BUFFER, velBuffers[i]);
-  gl.enableVertexAttribArray(velLoc);
-  gl.vertexAttribPointer(velLoc, 4, gl.FLOAT, false, 0, 0);
-}
-
-// VAOs for rendering
-const renderVAOs = [gl.createVertexArray(), gl.createVertexArray()];
-for (let i = 0; i < 2; i++) {
-  gl.bindVertexArray(renderVAOs[i]);
-  const posLoc = gl.getAttribLocation(renderProg, 'a_pos');
-  const velLoc = gl.getAttribLocation(renderProg, 'a_vel');
-  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffers[i]);
-  gl.enableVertexAttribArray(posLoc);
-  gl.vertexAttribPointer(posLoc, 4, gl.FLOAT, false, 0, 0);
-  gl.bindBuffer(gl.ARRAY_BUFFER, velBuffers[i]);
-  gl.enableVertexAttribArray(velLoc);
-  gl.vertexAttribPointer(velLoc, 4, gl.FLOAT, false, 0, 0);
-}
-
-// Transform feedback
-const transformFeedback = [gl.createTransformFeedback(), gl.createTransformFeedback()];
-for (let i = 0; i < 2; i++) {
-  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, transformFeedback[i]);
-  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, posBuffers[i]);
-  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 1, velBuffers[i]);
-}
-gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
-
-// Fullscreen quad
-const quadBuf = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-
-const quadVAO = gl.createVertexArray();
-gl.bindVertexArray(quadVAO);
-gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-gl.enableVertexAttribArray(0);
-gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-// --- FBOs for bloom ---
-let sceneFBO, bloomFBOs;
-
-function createFBO(w, h) {
-  const fbo = gl.createFramebuffer();
-  const tex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  return { fbo, tex, w, h };
-}
-
-function setupFBOs() {
-  sceneFBO = createFBO(width, height);
-  const bw = Math.max(1, Math.floor(width * BLOOM_SCALE));
-  const bh = Math.max(1, Math.floor(height * BLOOM_SCALE));
-  bloomFBOs = [createFBO(bw, bh), createFBO(bw, bh)];
+  attractors.push({ x: 0, y: 0, strength: 0, id: -1 });
 }
 
 // --- Resize ---
 function resize() {
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  width = Math.floor(w * dpr);
-  height = Math.floor(h * dpr);
+  cssW = window.innerWidth;
+  cssH = window.innerHeight;
+  width = Math.floor(cssW * dpr);
+  height = Math.floor(cssH * dpr);
   canvas.width = width;
   canvas.height = height;
-  setupFBOs();
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
 }
-
 window.addEventListener('resize', resize);
 resize();
 
-// --- Projection ---
-function perspective(fov, aspect, near, far) {
-  const f = 1.0 / Math.tan(fov / 2);
-  const nf = 1 / (near - far);
-  return new Float32Array([
-    f/aspect, 0, 0, 0,
-    0, f, 0, 0,
-    0, 0, (far+near)*nf, -1,
-    0, 0, 2*far*near*nf, 0
-  ]);
-}
+// --- Particles ---
+const px = new Float32Array(NUM_PARTICLES);
+const py = new Float32Array(NUM_PARTICLES);
+const pz = new Float32Array(NUM_PARTICLES);
+const vx = new Float32Array(NUM_PARTICLES);
+const vy = new Float32Array(NUM_PARTICLES);
+const vz = new Float32Array(NUM_PARTICLES);
+const age = new Float32Array(NUM_PARTICLES);
+const lifetime = new Float32Array(NUM_PARTICLES);
+const baseR = new Float32Array(NUM_PARTICLES); // base radius for orbit
 
-function lookAt(eye, center, up) {
-  const zx = eye[0]-center[0], zy = eye[1]-center[1], zz = eye[2]-center[2];
-  let len = 1/Math.sqrt(zx*zx+zy*zy+zz*zz);
-  const z = [zx*len, zy*len, zz*len];
-  const xx = up[1]*z[2]-up[2]*z[1], xy = up[2]*z[0]-up[0]*z[2], xz = up[0]*z[1]-up[1]*z[0];
-  len = 1/Math.sqrt(xx*xx+xy*xy+xz*xz);
-  const x = [xx*len, xy*len, xz*len];
-  const y = [x[1]*z[2]-x[2]*z[1], x[2]*z[0]-x[0]*z[2], x[0]*z[1]-x[1]*z[0]];
-  return new Float32Array([
-    x[0], y[0], z[0], 0,
-    x[1], y[1], z[1], 0,
-    x[2], y[2], z[2], 0,
-    -(x[0]*eye[0]+x[1]*eye[1]+x[2]*eye[2]),
-    -(y[0]*eye[0]+y[1]*eye[1]+y[2]*eye[2]),
-    -(z[0]*eye[0]+z[1]*eye[1]+z[2]*eye[2]),
-    1
-  ]);
-}
+// Target positions for intro animation
+const targetX = new Float32Array(NUM_PARTICLES);
+const targetY = new Float32Array(NUM_PARTICLES);
+const targetZ = new Float32Array(NUM_PARTICLES);
 
-function multiply(a, b) {
-  const out = new Float32Array(16);
-  for (let i = 0; i < 4; i++) {
-    for (let j = 0; j < 4; j++) {
-      out[i*4+j] = a[j]*b[i*4] + a[4+j]*b[i*4+1] + a[8+j]*b[i*4+2] + a[12+j]*b[i*4+3];
-    }
+function initParticles() {
+  const numArms = 3;
+  for (let i = 0; i < NUM_PARTICLES; i++) {
+    const arm = i % numArms;
+    const armAngle = (arm / numArms) * Math.PI * 2;
+    const t = Math.random();
+    const r = 0.1 + t * 2.8;
+    const spiralAngle = armAngle + Math.log(r + 1) * 2.5;
+    const spread = (1.0 - t * 0.5) * 0.7;
+    const angle = spiralAngle + (Math.random() - 0.5) * spread;
+
+    // Target galaxy position
+    targetX[i] = Math.cos(angle) * r + (Math.random() - 0.5) * 0.15;
+    targetY[i] = Math.sin(angle) * r + (Math.random() - 0.5) * 0.15;
+    targetZ[i] = (Math.random() - 0.5) * 0.2 * (1.0 + r * 0.05);
+
+    // Start scattered
+    const scatter = 4.0;
+    px[i] = targetX[i] + (Math.random() - 0.5) * scatter;
+    py[i] = targetY[i] + (Math.random() - 0.5) * scatter;
+    pz[i] = targetZ[i] + (Math.random() - 0.5) * scatter * 0.3;
+
+    // Tangential velocity
+    const speed = 0.15 + Math.random() * 0.1;
+    vx[i] = -Math.sin(angle) * speed;
+    vy[i] = Math.cos(angle) * speed;
+    vz[i] = (Math.random() - 0.5) * 0.02;
+
+    age[i] = Math.random() * 12.0;
+    lifetime[i] = 6.0 + Math.random() * 10.0;
+    baseR[i] = r;
   }
-  return out;
+}
+initParticles();
+
+// --- Simple noise for turbulence ---
+function noise3d(x, y, z) {
+  const n = Math.sin(x * 12.9898 + y * 78.233 + z * 45.164) * 43758.5453;
+  return n - Math.floor(n);
 }
 
 // --- Input ---
 function screenToWorld(sx, sy) {
-  const nx = (sx / canvas.clientWidth) * 2 - 1;
-  const ny = -((sy / canvas.clientHeight) * 2 - 1);
-  return [nx * 5, ny * 5, 0];
+  return [(sx / cssW) * 2 - 1, -((sy / cssH) * 2 - 1)];
 }
 
 canvas.addEventListener('pointerdown', (e) => {
@@ -651,8 +158,8 @@ canvas.addEventListener('pointerdown', (e) => {
   }
   for (let i = 0; i < MAX_ATTRACTORS; i++) {
     if (attractors[i].id === -1) {
-      const [wx, wy, wz] = screenToWorld(e.clientX, e.clientY);
-      attractors[i] = { x: wx, y: wy, z: wz, strength: 1.0, id: e.pointerId };
+      const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+      attractors[i] = { x: wx * 3.5, y: wy * 3.5, strength: 1.0, id: e.pointerId };
       break;
     }
   }
@@ -663,10 +170,9 @@ canvas.addEventListener('pointermove', (e) => {
   idleTime = 0;
   for (let i = 0; i < MAX_ATTRACTORS; i++) {
     if (attractors[i].id === e.pointerId) {
-      const [wx, wy, wz] = screenToWorld(e.clientX, e.clientY);
-      attractors[i].x = wx;
-      attractors[i].y = wy;
-      attractors[i].z = wz;
+      const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+      attractors[i].x = wx * 3.5;
+      attractors[i].y = wy * 3.5;
       break;
     }
   }
@@ -676,7 +182,6 @@ function releasePointer(e) {
   for (let i = 0; i < MAX_ATTRACTORS; i++) {
     if (attractors[i].id === e.pointerId) {
       attractors[i].id = -1;
-      // Fade out will happen in render loop
       break;
     }
   }
@@ -686,27 +191,76 @@ canvas.addEventListener('pointerup', releasePointer);
 canvas.addEventListener('pointercancel', releasePointer);
 canvas.style.touchAction = 'none';
 
-// Device orientation for tilt parallax
-if (window.DeviceOrientationEvent) {
-  window.addEventListener('deviceorientation', (e) => {
-    if (e.gamma !== null) cameraTiltX = (e.gamma / 90) * 0.3;
-    if (e.beta !== null) cameraTiltY = ((e.beta - 45) / 90) * 0.3;
-  });
+// --- Color palette ---
+function nebulaPalette(t, hueShift) {
+  // t: 0-1, hueShift: 0-1
+  t = Math.max(0, Math.min(1, t));
+  let r, g, b;
+  if (t < 0.25) {
+    const s = t / 0.25;
+    r = 0.05 + s * 0.0;  g = 0.01 + s * 0.15;  b = 0.15 + s * 0.45;
+  } else if (t < 0.5) {
+    const s = (t - 0.25) / 0.25;
+    r = 0.05 + s * 0.35;  g = 0.16 + s * 0.2;  b = 0.6 + s * (-0.1);
+  } else if (t < 0.75) {
+    const s = (t - 0.5) / 0.25;
+    r = 0.4 + s * 0.5;  g = 0.36 + s * 0.1;  b = 0.5 - s * 0.3;
+  } else {
+    const s = (t - 0.75) / 0.25;
+    r = 0.9 + s * 0.1;  g = 0.46 + s * 0.44;  b = 0.2 + s * 0.6;
+  }
+
+  // Rotate hue slightly
+  const angle = hueShift * Math.PI * 2;
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  const nr = r * (0.7 + 0.3 * cos) + g * 0.3 * sin;
+  const ng = g * (0.7 + 0.3 * cos) - r * 0.15 * sin + b * 0.15 * sin;
+  const nb = b * (0.7 + 0.3 * cos) - g * 0.3 * sin;
+
+  return [
+    Math.max(0, Math.min(1, nr)) * 255,
+    Math.max(0, Math.min(1, ng)) * 255,
+    Math.max(0, Math.min(1, nb)) * 255
+  ];
 }
 
-// --- Ping-pong index ---
-let current = 0;
+// --- Smoothstep ---
+function smoothstep(x) {
+  x = Math.max(0, Math.min(1, x));
+  return x * x * (3 - 2 * x);
+}
+
+// --- Offscreen canvas for glow effect ---
+let glowCanvas, glowCtx;
+function setupGlow() {
+  glowCanvas = document.createElement('canvas');
+  glowCanvas.width = Math.floor(width / 4);
+  glowCanvas.height = Math.floor(height / 4);
+  glowCtx = glowCanvas.getContext('2d');
+}
+setupGlow();
+
+window.addEventListener('resize', () => {
+  resize();
+  setupGlow();
+});
+
+// --- Sort buffer for depth sorting ---
+const sortIndices = new Uint32Array(NUM_PARTICLES);
+const sortDepths = new Float32Array(NUM_PARTICLES);
 
 // --- Render Loop ---
 function frame(now) {
   requestAnimationFrame(frame);
 
   now *= 0.001;
-  const dt = Math.min(now - lastTime, 0.05); // cap dt
+  if (lastTime === 0) lastTime = now;
+  const dt = Math.min(now - lastTime, 0.05);
   lastTime = now;
   time += dt;
   idleTime += dt;
-  introProgress = Math.min(introProgress + dt * 0.4, 1.0);
+  introProgress = Math.min(introProgress + dt * 0.35, 1.0);
+  const introT = smoothstep(introProgress);
 
   // Fade out released attractors
   for (let i = 0; i < MAX_ATTRACTORS; i++) {
@@ -717,117 +271,203 @@ function frame(now) {
 
   // Idle rotation
   if (idleTime > 5.0) {
-    cameraAngle += dt * 0.08;
+    cameraAngle += dt * 0.1;
   }
-
-  const next = 1 - current;
-
-  // --- Simulation pass ---
-  gl.useProgram(simProg);
-  gl.uniform1f(simU.u_dt, dt);
-  gl.uniform1f(simU.u_time, time);
-  gl.uniform1f(simU.u_introProgress, smoothstep(introProgress));
-
-  for (let i = 0; i < MAX_ATTRACTORS; i++) {
-    const a = attractors[i];
-    gl.uniform4f(simU[`u_attractors[${i}]`], a.x, a.y, a.z, a.strength);
-  }
-
-  gl.bindVertexArray(simVAOs[current]);
-  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, transformFeedback[next]);
-  gl.enable(gl.RASTERIZER_DISCARD);
-  gl.beginTransformFeedback(gl.POINTS);
-  gl.drawArrays(gl.POINTS, 0, NUM_PARTICLES);
-  gl.endTransformFeedback();
-  gl.disable(gl.RASTERIZER_DISCARD);
-  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
-
-  // --- Render particles to scene FBO ---
-  gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFBO.fbo);
-  gl.viewport(0, 0, width, height);
-  gl.clearColor(0.01, 0.005, 0.03, 1.0);
-  gl.clear(gl.COLOR_BUFFER_BIT);
-
-  gl.useProgram(renderProg);
 
   // Camera
-  const camDist = 8.0;
-  const camX = Math.sin(cameraAngle + cameraTiltX) * camDist;
-  const camY = cameraTiltY * 2.0;
-  const camZ = Math.cos(cameraAngle + cameraTiltX) * camDist;
+  const cosA = Math.cos(cameraAngle);
+  const sinA = Math.sin(cameraAngle);
 
-  const proj = perspective(Math.PI / 3, width / height, 0.1, 50);
-  const view = lookAt([camX, camY, camZ], [0, 0, 0], [0, 1, 0]);
-  const projView = multiply(proj, view);
+  // --- Physics Update ---
+  for (let i = 0; i < NUM_PARTICLES; i++) {
+    age[i] += dt;
+    if (age[i] > lifetime[i]) age[i] = 0;
 
-  gl.uniformMatrix4fv(renderU.u_projView, false, projView);
-  gl.uniform1f(renderU.u_time, time);
-  gl.uniform1f(renderU.u_pointScale, height * 0.15);
+    let x = px[i], y = py[i], z = pz[i];
+    let _vx = vx[i], _vy = vy[i], _vz = vz[i];
 
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // Additive
-  gl.bindVertexArray(renderVAOs[next]);
-  gl.drawArrays(gl.POINTS, 0, NUM_PARTICLES);
-  gl.disable(gl.BLEND);
+    // Gravity toward center
+    const dist = Math.sqrt(x * x + y * y + z * z) + 0.001;
+    const gravStr = 0.5 / (dist * 0.5 + 0.1);
+    const dx = -x / dist, dy = -y / dist, dz = -z / dist;
+    _vx += dx * gravStr * dt;
+    _vy += dy * gravStr * dt;
+    _vz += dz * gravStr * dt * 0.5;
 
-  // --- Bloom pass ---
-  const bw = bloomFBOs[0].w;
-  const bh = bloomFBOs[0].h;
+    // Tangential orbital velocity
+    const tgx = -dy, tgy = dx;
+    const orbSpeed = Math.sqrt(gravStr * dist) * 0.35;
+    _vx += tgx * orbSpeed * dt * 0.3;
+    _vy += tgy * orbSpeed * dt * 0.3;
 
-  gl.useProgram(bloomProg);
-  gl.bindVertexArray(quadVAO);
+    // Flatten toward disk
+    _vz -= z * 0.3 * dt;
 
-  // Horizontal blur
-  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBOs[0].fbo);
-  gl.viewport(0, 0, bw, bh);
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, sceneFBO.tex);
-  gl.uniform1i(bloomU.u_tex, 0);
-  gl.uniform2f(bloomU.u_dir, 1.0, 0.0);
-  gl.uniform2f(bloomU.u_resolution, bw, bh);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Simple turbulence
+    const n1 = noise3d(x * 0.7 + time * 0.1, y * 0.7, z * 0.7);
+    const n2 = noise3d(y * 0.7, z * 0.7 + time * 0.1, x * 0.7);
+    const n3 = noise3d(z * 0.7, x * 0.7, y * 0.7 + time * 0.1);
+    _vx += (n1 - 0.5) * 0.3 * dt;
+    _vy += (n2 - 0.5) * 0.3 * dt;
+    _vz += (n3 - 0.5) * 0.1 * dt;
 
-  // Vertical blur
-  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBOs[1].fbo);
-  gl.bindTexture(gl.TEXTURE_2D, bloomFBOs[0].tex);
-  gl.uniform2f(bloomU.u_dir, 0.0, 1.0);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Attractors
+    for (let j = 0; j < MAX_ATTRACTORS; j++) {
+      const a = attractors[j];
+      if (a.strength > 0.01) {
+        const adx = a.x - x, ady = a.y - y;
+        const aDist = Math.sqrt(adx * adx + ady * ady) + 0.01;
+        const aForce = a.strength * 5.0 / (aDist * aDist + 0.3);
+        _vx += (adx / aDist) * aForce * dt;
+        _vy += (ady / aDist) * aForce * dt;
+        // Swirl
+        _vx += (-ady / aDist) * aForce * 0.3 * dt;
+        _vy += (adx / aDist) * aForce * 0.3 * dt;
+      }
+    }
 
-  // Second bloom pass for wider glow
-  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBOs[0].fbo);
-  gl.bindTexture(gl.TEXTURE_2D, bloomFBOs[1].tex);
-  gl.uniform2f(bloomU.u_dir, 2.0, 0.0);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Intro: pull toward target
+    if (introT < 1.0) {
+      const pullStr = (1.0 - introT) * 0.5;
+      _vx += (targetX[i] - x) * pullStr * dt;
+      _vy += (targetY[i] - y) * pullStr * dt;
+      _vz += (targetZ[i] - z) * pullStr * dt;
+    }
 
-  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBOs[1].fbo);
-  gl.bindTexture(gl.TEXTURE_2D, bloomFBOs[0].tex);
-  gl.uniform2f(bloomU.u_dir, 0.0, 2.0);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Damping
+    _vx *= 0.997;
+    _vy *= 0.997;
+    _vz *= 0.997;
 
-  // --- Composite to screen ---
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.viewport(0, 0, width, height);
-  gl.useProgram(compositeProg);
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, sceneFBO.tex);
-  gl.uniform1i(compositeU.u_scene, 0);
-  gl.activeTexture(gl.TEXTURE1);
-  gl.bindTexture(gl.TEXTURE_2D, bloomFBOs[1].tex);
-  gl.uniform1i(compositeU.u_bloom, 1);
-  gl.uniform1f(compositeU.u_bloomStrength, 0.8);
-  gl.bindVertexArray(quadVAO);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Speed limit
+    const speed = Math.sqrt(_vx * _vx + _vy * _vy + _vz * _vz);
+    if (speed > 2.0) {
+      const s = 2.0 / speed;
+      _vx *= s; _vy *= s; _vz *= s;
+    }
 
-  current = next;
-}
+    x += _vx * dt;
+    y += _vy * dt;
+    z += _vz * dt;
 
-function smoothstep(x) {
-  x = Math.max(0, Math.min(1, x));
-  return x * x * (3 - 2 * x);
+    // Soft boundary
+    const r = Math.sqrt(x * x + y * y + z * z);
+    if (r > 5.0) {
+      const s = 5.0 / r;
+      x *= s; y *= s; z *= s;
+      _vx *= -0.2; _vy *= -0.2; _vz *= -0.2;
+    }
+
+    px[i] = x; py[i] = y; pz[i] = z;
+    vx[i] = _vx; vy[i] = _vy; vz[i] = _vz;
+  }
+
+  // --- Render ---
+  const cx = width / 2;
+  const cy = height / 2;
+  const scale = Math.min(width, height) * 0.12;
+  const hueShift = (time * 0.016) % 1.0;
+
+  // Clear main canvas
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(2, 1, 8, 1)';
+  ctx.fillRect(0, 0, width, height);
+
+  // Clear glow canvas
+  glowCtx.clearRect(0, 0, glowCanvas.width, glowCanvas.height);
+  const gScale = glowCanvas.width / width;
+
+  // Compute projected positions and sort by depth
+  for (let i = 0; i < NUM_PARTICLES; i++) {
+    // Rotate by camera
+    const rx = px[i] * cosA - pz[i] * sinA;
+    const rz = px[i] * sinA + pz[i] * cosA;
+    sortDepths[i] = rz;
+    sortIndices[i] = i;
+  }
+
+  // We'll skip full sort for performance — just render with additive blending
+  // which looks correct regardless of order
+
+  // Draw particles
+  ctx.globalCompositeOperation = 'lighter'; // additive blending!
+
+  for (let i = 0; i < NUM_PARTICLES; i++) {
+    const x = px[i], y = py[i], z = pz[i];
+
+    // Rotate by camera angle
+    const rx = x * cosA - z * sinA;
+    const ry = y;
+    const rz = x * sinA + z * cosA;
+
+    // Perspective projection
+    const depth = rz + 6.0; // camera at z=6
+    if (depth < 0.1) continue;
+    const projScale = 4.0 / depth;
+    const sx = cx + rx * scale * projScale;
+    const sy = cy - ry * scale * projScale;
+
+    // Off-screen culling
+    if (sx < -10 || sx > width + 10 || sy < -10 || sy > height + 10) continue;
+
+    // Age fade
+    const ageFrac = age[i] / lifetime[i];
+    const fadeMask = smoothstep(ageFrac * 10.0) * smoothstep((1.0 - ageFrac) * 5.0);
+
+    // Speed-based color
+    const spd = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]);
+    const colorT = Math.min(1, spd * 0.5 + (1.0 / depth) * 0.3);
+    const [cr, cg, cb] = nebulaPalette(colorT, hueShift);
+
+    // Depth fog
+    const fog = Math.exp(-depth * 0.06);
+    const alpha = fadeMask * fog * (0.3 + spd * 0.2) * projScale * 0.5;
+
+    if (alpha < 0.01) continue;
+
+    // Size
+    const size = Math.max(0.5, projScale * (0.8 + spd * 0.3)) * dpr;
+
+    // Draw on main canvas
+    const a = Math.min(1, alpha);
+    ctx.fillStyle = `rgba(${cr|0},${cg|0},${cb|0},${a.toFixed(3)})`;
+    ctx.fillRect(sx - size * 0.5, sy - size * 0.5, size, size);
+
+    // Draw bright particles on glow canvas too
+    if (alpha > 0.15) {
+      const ga = Math.min(1, alpha * 1.5);
+      glowCtx.fillStyle = `rgba(${cr|0},${cg|0},${cb|0},${ga.toFixed(3)})`;
+      const gs = size * gScale * 2;
+      glowCtx.fillRect(sx * gScale - gs * 0.5, sy * gScale - gs * 0.5, gs, gs);
+    }
+  }
+
+  // --- Apply bloom/glow ---
+  // Draw blurred glow canvas over main with additive blend
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.filter = `blur(${Math.max(4, 8 * dpr)}px)`;
+  ctx.globalAlpha = 0.6;
+  ctx.drawImage(glowCanvas, 0, 0, width, height);
+  ctx.filter = 'none';
+
+  // Second wider glow pass
+  ctx.globalAlpha = 0.3;
+  ctx.filter = `blur(${Math.max(8, 16 * dpr)}px)`;
+  ctx.drawImage(glowCanvas, 0, 0, width, height);
+  ctx.filter = 'none';
+  ctx.globalAlpha = 1.0;
+
+  // Vignette
+  ctx.globalCompositeOperation = 'source-over';
+  const vignette = ctx.createRadialGradient(cx, cy, Math.min(width, height) * 0.2, cx, cy, Math.max(width, height) * 0.7);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.5)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, width, height);
 }
 
 // --- Start ---
-lastTime = performance.now() * 0.001;
+lastTime = 0;
 requestAnimationFrame(frame);
 
 // Fade in
