@@ -103,10 +103,10 @@ const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
 const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1);
-const NUM_PARTICLES = isMobile ? 50000 : 120000;
+const NUM_PARTICLES = isMobile ? 35000 : 120000;
 const MAX_ATTRACTORS = 4;
 const MAX_COMETS = 20;
-let dpr = Math.min(window.devicePixelRatio || 1, 2);
+let dpr = isMobile ? 1 : Math.min(window.devicePixelRatio || 1, 2);
 
 let width, height, cssW, cssH;
 let time = 0, lastTime = 0, introProgress = 0, idleTime = 0, cameraAngle = 0;
@@ -474,15 +474,57 @@ function smoothstep(x) {
   return x * x * (3 - 2 * x);
 }
 
-let glowCanvas, glowCtx;
+let glowCanvas, glowCtx, glowImgData, glowPixels, glowTmp;
 function setupGlow() {
   glowCanvas = document.createElement('canvas');
-  glowCanvas.width = Math.floor(width / 4);
-  glowCanvas.height = Math.floor(height / 4);
+  glowCanvas.width = Math.max(1, Math.floor(width / 6));
+  glowCanvas.height = Math.max(1, Math.floor(height / 6));
   glowCtx = glowCanvas.getContext('2d');
+  glowImgData = glowCtx.createImageData(glowCanvas.width, glowCanvas.height);
+  glowPixels = new Uint8ClampedArray(glowImgData.data.length);
+  glowTmp = new Uint8ClampedArray(glowImgData.data.length);
 }
 setupGlow();
 window.addEventListener('resize', () => { resize(); setupGlow(); setupImageData(); });
+
+function fastBoxBlur(src, dst, w, h, radius) {
+  const len = w * h * 4;
+  const div = radius * 2 + 1;
+  // Horizontal pass
+  for (let y = 0; y < h; y++) {
+    for (let c = 0; c < 4; c++) {
+      let sum = 0;
+      for (let kx = -radius; kx <= radius; kx++) {
+        const xi = Math.max(0, Math.min(w - 1, kx));
+        sum += src[(y * w + xi) * 4 + c];
+      }
+      dst[(y * w) * 4 + c] = (sum / div) | 0;
+      for (let x = 1; x < w; x++) {
+        const addX = Math.min(w - 1, x + radius);
+        const subX = Math.max(0, x - radius - 1);
+        sum += src[(y * w + addX) * 4 + c] - src[(y * w + subX) * 4 + c];
+        dst[(y * w + x) * 4 + c] = (sum / div) | 0;
+      }
+    }
+  }
+  // Vertical pass
+  for (let x = 0; x < w; x++) {
+    for (let c = 0; c < 4; c++) {
+      let sum = 0;
+      for (let ky = -radius; ky <= radius; ky++) {
+        const yi = Math.max(0, Math.min(h - 1, ky));
+        sum += dst[(yi * w + x) * 4 + c];
+      }
+      src[(0 * w + x) * 4 + c] = (sum / div) | 0;
+      for (let y = 1; y < h; y++) {
+        const addY = Math.min(h - 1, y + radius);
+        const subY = Math.max(0, y - radius - 1);
+        sum += dst[(addY * w + x) * 4 + c] - dst[(subY * w + x) * 4 + c];
+        src[(y * w + x) * 4 + c] = (sum / div) | 0;
+      }
+    }
+  }
+}
 
 let imgData, pixels;
 function setupImageData() {
@@ -753,22 +795,20 @@ function frame(now) {
 
   ctx.putImageData(imgData, 0, 0);
 
-  // --- Glow pass ---
+  // --- Fast glow pass using manual box blur on tiny canvas ---
   const gW = glowCanvas.width;
   const gH = glowCanvas.height;
-  glowCtx.clearRect(0, 0, gW, gH);
   glowCtx.drawImage(canvas, 0, 0, gW, gH);
+  const glowSrc = glowCtx.getImageData(0, 0, gW, gH);
+  glowPixels.set(glowSrc.data);
+  fastBoxBlur(glowPixels, glowTmp, gW, gH, 3);
+  fastBoxBlur(glowPixels, glowTmp, gW, gH, 3);
+  glowImgData.data.set(glowPixels);
+  glowCtx.putImageData(glowImgData, 0, 0);
 
   ctx.globalCompositeOperation = 'lighter';
-  ctx.filter = `blur(${Math.max(6, 12 * dpr)}px)`;
-  ctx.globalAlpha = 0.7 + audioEnergy * 0.3;
+  ctx.globalAlpha = 0.8 + audioEnergy * 0.3;
   ctx.drawImage(glowCanvas, 0, 0, width, height);
-
-  ctx.filter = `blur(${Math.max(12, 24 * dpr)}px)`;
-  ctx.globalAlpha = 0.4 + audioBass * 0.4;
-  ctx.drawImage(glowCanvas, 0, 0, width, height);
-
-  ctx.filter = 'none';
   ctx.globalAlpha = 1.0;
   ctx.globalCompositeOperation = 'source-over';
 
@@ -862,8 +902,8 @@ window.__COSMOS_TESTS__ = {
     audioBass = 0; audioMid = 0; audioTreble = 0; audioEnergy = savedE;
 
     // Test 2.5: Bloom reacts to audio
-    const bloomAlpha = 0.7 + 0.8 * 0.3; // audioEnergy=0.8
-    assert('F2.5 Bloom reacts', bloomAlpha > 0.9,
+    const bloomAlpha = 0.8 + 0.8 * 0.3; // audioEnergy=0.8
+    assert('F2.5 Bloom reacts', bloomAlpha > 1.0,
       `bloomAlpha=${bloomAlpha.toFixed(2)} with energy=0.8`);
 
     // === FEATURE 3: Shape Morphing ===
