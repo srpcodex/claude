@@ -48,52 +48,91 @@
     pointer-events: none;
   }
   #fade.out { opacity: 0; }
+  #mic-btn {
+    position: fixed; top: 24px; right: 24px; z-index: 15;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: rgba(255,255,255,0.5);
+    font-size: 18px; line-height: 40px; text-align: center;
+    cursor: pointer; pointer-events: auto;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  #mic-btn.active {
+    background: rgba(255,60,60,0.25);
+    border-color: rgba(255,60,60,0.6);
+    color: rgba(255,100,100,0.9);
+    box-shadow: 0 0 12px rgba(255,60,60,0.3);
+  }
+  #shape-label {
+    position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+    font-family: -apple-system, 'Helvetica Neue', sans-serif;
+    font-size: 13px; font-weight: 300; letter-spacing: 3px; text-transform: uppercase;
+    color: rgba(255,255,255,0.0);
+    pointer-events: none; z-index: 15;
+    transition: color 0.5s ease;
+    white-space: nowrap;
+  }
+  #shape-label.show { color: rgba(255,255,255,0.5); }
 </style>
 </head>
 <body>
 <div id="fade"></div>
 <div id="overlay">
   <div id="title">Cosmos</div>
-  <div id="hint">touch to interact</div>
+  <div id="hint">double-tap to morph &bull; shake for meteors</div>
 </div>
+<button id="mic-btn">&#x1f3a4;</button>
+<div id="shape-label"></div>
 <canvas id="c"></canvas>
 <script>
 // ============================================================
 // COSMOS — Interactive Particle Galaxy
-// Canvas 2D version — maximum compatibility
+// Features: touch gravity, shooting stars, audio-reactive,
+//           shape morphing (spiral/ring/heart/helix/infinity)
 // ============================================================
 
-// Prevent all context menus and selection on mobile
 document.addEventListener('contextmenu', e => e.preventDefault());
 document.addEventListener('selectstart', e => e.preventDefault());
-document.addEventListener('touchstart', e => { if (e.target === canvas) e.preventDefault(); }, { passive: false });
-document.addEventListener('touchmove', e => { if (e.target === canvas) e.preventDefault(); }, { passive: false });
-document.addEventListener('touchend', e => { if (e.target === canvas) e.preventDefault(); }, { passive: false });
+document.addEventListener('touchstart', e => { if (e.target.id === 'c') e.preventDefault(); }, { passive: false });
+document.addEventListener('touchmove', e => { if (e.target.id === 'c') e.preventDefault(); }, { passive: false });
+document.addEventListener('touchend', e => { if (e.target.id === 'c') e.preventDefault(); }, { passive: false });
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
-// --- Configuration ---
 const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1);
 const NUM_PARTICLES = isMobile ? 50000 : 120000;
 const MAX_ATTRACTORS = 4;
+const MAX_COMETS = 20;
 let dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-// --- State ---
 let width, height, cssW, cssH;
-let time = 0;
-let lastTime = 0;
-let introProgress = 0;
-let idleTime = 0;
-let cameraAngle = 0;
+let time = 0, lastTime = 0, introProgress = 0, idleTime = 0, cameraAngle = 0;
 let hintHidden = false;
+
+// ============================================================
+// FEATURE 2: Audio Reactivity State
+// ============================================================
+let audioCtx = null, analyser = null, audioData = null;
+let audioActive = false;
+let audioBass = 0, audioMid = 0, audioTreble = 0, audioEnergy = 0;
+
+// ============================================================
+// FEATURE 3: Shape Morphing State
+// ============================================================
+const SHAPES = ['spiral', 'ring', 'heart', 'helix', 'infinity'];
+const SHAPE_LABELS = ['Spiral Galaxy', 'Ring Nebula', 'Heart Nebula', 'DNA Helix', 'Infinity'];
+let currentShape = 0;
+let morphProgress = 1.0; // 1 = fully morphed to current shape
+let lastTapTime = 0;
 
 const attractors = [];
 for (let i = 0; i < MAX_ATTRACTORS; i++) {
   attractors.push({ x: 0, y: 0, strength: 0, id: -1 });
 }
 
-// --- Resize ---
 function resize() {
   cssW = window.innerWidth;
   cssH = window.innerHeight;
@@ -116,77 +155,219 @@ const vy = new Float32Array(NUM_PARTICLES);
 const vz = new Float32Array(NUM_PARTICLES);
 const age = new Float32Array(NUM_PARTICLES);
 const lifetime = new Float32Array(NUM_PARTICLES);
+const morphTargetX = new Float32Array(NUM_PARTICLES);
+const morphTargetY = new Float32Array(NUM_PARTICLES);
+const morphTargetZ = new Float32Array(NUM_PARTICLES);
 
-// Target positions for intro animation
-const targetX = new Float32Array(NUM_PARTICLES);
-const targetY = new Float32Array(NUM_PARTICLES);
-const targetZ = new Float32Array(NUM_PARTICLES);
-
-function initParticles() {
+// ============================================================
+// FEATURE 3: Shape generation functions
+// ============================================================
+function generateShapeTargets(shapeName) {
   const numArms = 4;
   for (let i = 0; i < NUM_PARTICLES; i++) {
-    const arm = i % numArms;
-    const armAngle = (arm / numArms) * Math.PI * 2;
-    const t = Math.pow(Math.random(), 0.6); // bias toward center for density
-    const r = 0.05 + t * 4.0; // larger galaxy radius
-    const spiralAngle = armAngle + Math.log(r + 1) * 3.0;
-    const spread = (1.0 - t * 0.4) * 0.9;
-    const angle = spiralAngle + (Math.random() - 0.5) * spread;
+    const t = i / NUM_PARTICLES;
+    const rand1 = noise3d(i * 0.1, 0, 0);
+    const rand2 = noise3d(0, i * 0.1, 0);
+    const rand3 = noise3d(0, 0, i * 0.1);
+    const jitter = 0.15;
 
-    // Target galaxy position
-    targetX[i] = Math.cos(angle) * r + (Math.random() - 0.5) * 0.2;
-    targetY[i] = Math.sin(angle) * r + (Math.random() - 0.5) * 0.2;
-    targetZ[i] = (Math.random() - 0.5) * 0.3 * (1.0 + r * 0.08);
+    switch (shapeName) {
+      case 'spiral': {
+        const arm = i % numArms;
+        const armAngle = (arm / numArms) * Math.PI * 2;
+        const tr = Math.pow(Math.random(), 0.6);
+        const r = 0.05 + tr * 4.0;
+        const spiralAngle = armAngle + Math.log(r + 1) * 3.0;
+        const spread = (1.0 - tr * 0.4) * 0.9;
+        const angle = spiralAngle + (rand1 - 0.5) * spread;
+        morphTargetX[i] = Math.cos(angle) * r + (rand2 - 0.5) * jitter;
+        morphTargetY[i] = Math.sin(angle) * r + (rand3 - 0.5) * jitter;
+        morphTargetZ[i] = (rand1 - 0.5) * 0.3;
+        break;
+      }
+      case 'ring': {
+        const angle = t * Math.PI * 2 + (rand1 - 0.5) * 0.3;
+        const ringR = 2.5 + (rand2 - 0.5) * 0.8;
+        morphTargetX[i] = Math.cos(angle) * ringR;
+        morphTargetY[i] = Math.sin(angle) * ringR;
+        morphTargetZ[i] = (rand3 - 0.5) * 0.4;
+        break;
+      }
+      case 'heart': {
+        const angle = t * Math.PI * 2;
+        const hr = 0.3 + Math.random() * 0.7;
+        const hx = 16 * Math.pow(Math.sin(angle), 3);
+        const hy = 13 * Math.cos(angle) - 5 * Math.cos(2*angle) - 2 * Math.cos(3*angle) - Math.cos(4*angle);
+        const s = 0.18 * hr;
+        morphTargetX[i] = hx * s + (rand1 - 0.5) * 0.3;
+        morphTargetY[i] = hy * s + (rand2 - 0.5) * 0.3;
+        morphTargetZ[i] = (rand3 - 0.5) * 0.3 * hr;
+        break;
+      }
+      case 'helix': {
+        const strand = i % 2;
+        const helixT = (t * 2 % 1) * 6 - 3;
+        const helixAngle = helixT * 2.5 + strand * Math.PI;
+        const helixR = 1.2 + (rand1 - 0.5) * 0.3;
+        morphTargetX[i] = Math.cos(helixAngle) * helixR + (rand2 - 0.5) * 0.2;
+        morphTargetY[i] = helixT + (rand3 - 0.5) * 0.2;
+        morphTargetZ[i] = Math.sin(helixAngle) * helixR + (rand1 - 0.5) * 0.2;
+        // Rungs between strands
+        if (i % 40 < 2) {
+          const rungT = Math.random();
+          const rungAngle = helixT * 2.5;
+          morphTargetX[i] = Math.cos(rungAngle) * helixR * (1 - rungT) + Math.cos(rungAngle + Math.PI) * helixR * rungT;
+          morphTargetZ[i] = Math.sin(rungAngle) * helixR * (1 - rungT) + Math.sin(rungAngle + Math.PI) * helixR * rungT;
+        }
+        break;
+      }
+      case 'infinity': {
+        const infT = t * Math.PI * 2;
+        const infScale = 2.5;
+        const denom = 1 + Math.sin(infT) * Math.sin(infT);
+        const r2 = 0.5 + Math.random() * 0.5;
+        morphTargetX[i] = infScale * Math.cos(infT) / denom * r2 + (rand1 - 0.5) * 0.2;
+        morphTargetY[i] = infScale * Math.sin(infT) * Math.cos(infT) / denom * r2 + (rand2 - 0.5) * 0.2;
+        morphTargetZ[i] = (rand3 - 0.5) * 0.3 * r2;
+        break;
+      }
+    }
+  }
+}
 
-    // Start scattered
+function initParticles() {
+  generateShapeTargets('spiral');
+  for (let i = 0; i < NUM_PARTICLES; i++) {
     const scatter = 5.0;
-    px[i] = targetX[i] + (Math.random() - 0.5) * scatter;
-    py[i] = targetY[i] + (Math.random() - 0.5) * scatter;
-    pz[i] = targetZ[i] + (Math.random() - 0.5) * scatter * 0.3;
-
-    // Tangential velocity
+    px[i] = morphTargetX[i] + (Math.random() - 0.5) * scatter;
+    py[i] = morphTargetY[i] + (Math.random() - 0.5) * scatter;
+    pz[i] = morphTargetZ[i] + (Math.random() - 0.5) * scatter * 0.3;
+    const angle = Math.atan2(morphTargetY[i], morphTargetX[i]);
     const speed = 0.2 + Math.random() * 0.15;
     vx[i] = -Math.sin(angle) * speed;
     vy[i] = Math.cos(angle) * speed;
     vz[i] = (Math.random() - 0.5) * 0.02;
-
     age[i] = Math.random() * 12.0;
     lifetime[i] = 6.0 + Math.random() * 10.0;
   }
 }
 initParticles();
 
-// --- Simple noise for turbulence ---
-function noise3d(x, y, z) {
-  const n = Math.sin(x * 12.9898 + y * 78.233 + z * 45.164) * 43758.5453;
-  return n - Math.floor(n);
+// ============================================================
+// FEATURE 1: Shooting Stars / Comets
+// ============================================================
+const comets = [];
+function spawnComet() {
+  const angle = Math.random() * Math.PI * 2;
+  const speed = 3 + Math.random() * 4;
+  const r = 5 + Math.random() * 2;
+  const startX = Math.cos(angle) * r;
+  const startY = Math.sin(angle) * r;
+  const dirAngle = angle + Math.PI + (Math.random() - 0.5) * 0.8;
+  comets.push({
+    x: startX, y: startY, z: (Math.random() - 0.5) * 1.5,
+    vx: Math.cos(dirAngle) * speed,
+    vy: Math.sin(dirAngle) * speed,
+    vz: (Math.random() - 0.5) * 0.5,
+    life: 0, maxLife: 1.2 + Math.random() * 1.0,
+    trail: [],
+    brightness: 0.7 + Math.random() * 0.3,
+    hue: Math.random()
+  });
 }
 
-// --- Input: convert screen touch to world-space attractor position ---
-// This must match the projection used in rendering exactly.
-function screenToWorld(clientX, clientY) {
-  // The renderer projects world (rx, ry) to screen as:
-  //   sx_canvas = cx + rx * scale * projScale
-  //   sy_canvas = cy - ry * scale * projScale
-  // where projScale = camDist / depth, depth = rz + camDist
-  // For attractor at z=0 (rz=0 after camera rotation):
-  //   depth = camDist, projScale = 1.0
-  // So: rx = (sx_canvas - cx) / scale
-  //     ry = -(sy_canvas - cy) / scale
-
-  const cx = width / 2;
-  const cy = height / 2;
-  const scale = Math.min(width, height) * 0.18;
-
-  // Convert client coords to canvas pixel coords
-  const canvasX = clientX * dpr;
-  const canvasY = clientY * dpr;
-
-  const wx = (canvasX - cx) / scale;
-  const wy = -(canvasY - cy) / scale;
-  return [wx, wy];
+function triggerMeteorShower() {
+  const count = 8 + Math.floor(Math.random() * 7);
+  for (let i = 0; i < count; i++) {
+    setTimeout(() => spawnComet(), i * 100 + Math.random() * 200);
+  }
 }
 
+// Shake detection for meteor shower
+let lastAccel = { x: 0, y: 0, z: 0 };
+let shakeThreshold = 25;
+let lastShakeTime = 0;
+if (window.DeviceMotionEvent) {
+  window.addEventListener('devicemotion', (e) => {
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x === null) return;
+    const dx = a.x - lastAccel.x;
+    const dy = a.y - lastAccel.y;
+    const dz = a.z - lastAccel.z;
+    const force = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    lastAccel = { x: a.x, y: a.y, z: a.z };
+    const now = Date.now();
+    if (force > shakeThreshold && now - lastShakeTime > 2000) {
+      lastShakeTime = now;
+      triggerMeteorShower();
+    }
+  });
+}
+
+// Auto-spawn occasional shooting stars
+setInterval(() => {
+  if (Math.random() < 0.6) spawnComet();
+}, 3000);
+
+// ============================================================
+// FEATURE 2: Audio Reactivity
+// ============================================================
+const micBtn = document.getElementById('mic-btn');
+micBtn.addEventListener('click', async (e) => {
+  e.stopPropagation();
+  if (audioActive) {
+    audioActive = false;
+    micBtn.classList.remove('active');
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.7;
+    source.connect(analyser);
+    audioData = new Uint8Array(analyser.frequencyBinCount);
+    audioActive = true;
+    micBtn.classList.add('active');
+  } catch (err) {
+    console.warn('Mic access denied:', err);
+  }
+});
+
+function updateAudio() {
+  if (!audioActive || !analyser) {
+    audioBass = audioBass * 0.9;
+    audioMid = audioMid * 0.9;
+    audioTreble = audioTreble * 0.9;
+    audioEnergy = audioEnergy * 0.9;
+    return;
+  }
+  analyser.getByteFrequencyData(audioData);
+  const bins = audioData.length;
+  let bass = 0, mid = 0, treble = 0;
+  const bassEnd = Math.floor(bins * 0.15);
+  const midEnd = Math.floor(bins * 0.5);
+  for (let i = 0; i < bins; i++) {
+    const v = audioData[i] / 255;
+    if (i < bassEnd) bass += v;
+    else if (i < midEnd) mid += v;
+    else treble += v;
+  }
+  bass /= bassEnd;
+  mid /= (midEnd - bassEnd);
+  treble /= (bins - midEnd);
+  audioBass = audioBass * 0.6 + bass * 0.4;
+  audioMid = audioMid * 0.6 + mid * 0.4;
+  audioTreble = audioTreble * 0.6 + treble * 0.4;
+  audioEnergy = (audioBass * 0.5 + audioMid * 0.3 + audioTreble * 0.2);
+}
+
+// ============================================================
+// FEATURE 3: Double-tap to morph
+// ============================================================
 canvas.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   idleTime = 0;
@@ -194,6 +375,22 @@ canvas.addEventListener('pointerdown', (e) => {
     document.getElementById('hint').classList.add('hidden');
     hintHidden = true;
   }
+
+  const now = Date.now();
+  if (now - lastTapTime < 350) {
+    // Double tap: cycle shape
+    currentShape = (currentShape + 1) % SHAPES.length;
+    generateShapeTargets(SHAPES[currentShape]);
+    morphProgress = 0;
+    const label = document.getElementById('shape-label');
+    label.textContent = SHAPE_LABELS[currentShape];
+    label.classList.add('show');
+    setTimeout(() => label.classList.remove('show'), 2000);
+    lastTapTime = 0;
+    return;
+  }
+  lastTapTime = now;
+
   for (let i = 0; i < MAX_ATTRACTORS; i++) {
     if (attractors[i].id === -1) {
       const [wx, wy] = screenToWorld(e.clientX, e.clientY);
@@ -224,12 +421,26 @@ function releasePointer(e) {
     }
   }
 }
-
 canvas.addEventListener('pointerup', releasePointer);
 canvas.addEventListener('pointercancel', releasePointer);
 canvas.style.touchAction = 'none';
 
-// --- Color palette (brighter, more vivid) ---
+function noise3d(x, y, z) {
+  const n = Math.sin(x * 12.9898 + y * 78.233 + z * 45.164) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function screenToWorld(clientX, clientY) {
+  const cx = width / 2;
+  const cy = height / 2;
+  const scale = Math.min(width, height) * 0.18;
+  const canvasX = clientX * dpr;
+  const canvasY = clientY * dpr;
+  const wx = (canvasX - cx) / scale;
+  const wy = -(canvasY - cy) / scale;
+  return [wx, wy];
+}
+
 function nebulaPalette(t, hueShift) {
   t = Math.max(0, Math.min(1, t));
   let r, g, b;
@@ -246,14 +457,11 @@ function nebulaPalette(t, hueShift) {
     const s = (t - 0.7) / 0.3;
     r = 0.95 + s * 0.05;  g = 0.65 + s * 0.3;  b = 0.35 + s * 0.55;
   }
-
-  // Rotate hue
   const angle = hueShift * Math.PI * 2;
   const cos = Math.cos(angle), sin = Math.sin(angle);
   const nr = r * (0.7 + 0.3 * cos) + g * 0.3 * sin;
   const ng = g * (0.7 + 0.3 * cos) - r * 0.15 * sin + b * 0.15 * sin;
   const nb = b * (0.7 + 0.3 * cos) - g * 0.3 * sin;
-
   return [
     Math.max(0, Math.min(1, nr)) * 255,
     Math.max(0, Math.min(1, ng)) * 255,
@@ -261,13 +469,11 @@ function nebulaPalette(t, hueShift) {
   ];
 }
 
-// --- Smoothstep ---
 function smoothstep(x) {
   x = Math.max(0, Math.min(1, x));
   return x * x * (3 - 2 * x);
 }
 
-// --- Offscreen canvas for glow effect ---
 let glowCanvas, glowCtx;
 function setupGlow() {
   glowCanvas = document.createElement('canvas');
@@ -276,22 +482,18 @@ function setupGlow() {
   glowCtx = glowCanvas.getContext('2d');
 }
 setupGlow();
+window.addEventListener('resize', () => { resize(); setupGlow(); setupImageData(); });
 
-window.addEventListener('resize', () => {
-  resize();
-  setupGlow();
-});
-
-// --- Use ImageData for fast pixel rendering ---
 let imgData, pixels;
 function setupImageData() {
   imgData = ctx.createImageData(width, height);
   pixels = new Uint32Array(imgData.data.buffer);
 }
 setupImageData();
-window.addEventListener('resize', setupImageData);
 
-// --- Render Loop ---
+// ============================================================
+// MAIN RENDER LOOP
+// ============================================================
 function frame(now) {
   requestAnimationFrame(frame);
 
@@ -304,6 +506,18 @@ function frame(now) {
   introProgress = Math.min(introProgress + dt * 0.35, 1.0);
   const introT = smoothstep(introProgress);
 
+  // Morph progress
+  if (morphProgress < 1.0) {
+    morphProgress = Math.min(1.0, morphProgress + dt * 0.4);
+  }
+  const morphT = smoothstep(morphProgress);
+
+  // Audio update
+  updateAudio();
+  const audioScale = 1.0 + audioBass * 0.6;
+  const audioColorShift = audioMid * 0.3;
+  const audioSparkle = audioTreble * 0.5;
+
   // Fade out released attractors
   for (let i = 0; i < MAX_ATTRACTORS; i++) {
     if (attractors[i].id === -1 && attractors[i].strength > 0) {
@@ -311,12 +525,10 @@ function frame(now) {
     }
   }
 
-  // Idle rotation
   if (idleTime > 5.0) {
     cameraAngle += dt * 0.1;
   }
 
-  // Camera
   const cosA = Math.cos(cameraAngle);
   const sinA = Math.sin(cameraAngle);
   const camDist = 6.0;
@@ -329,30 +541,46 @@ function frame(now) {
     let x = px[i], y = py[i], z = pz[i];
     let _vx = vx[i], _vy = vy[i], _vz = vz[i];
 
+    // Pull toward morph target (shape morphing)
+    const morphPull = morphT < 1.0 ? 2.0 * (1.0 - morphT * 0.5) : 0.5;
+    const mtx = morphTargetX[i] * audioScale;
+    const mty = morphTargetY[i] * audioScale;
+    const mtz = morphTargetZ[i] * audioScale;
+    _vx += (mtx - x) * morphPull * dt;
+    _vy += (mty - y) * morphPull * dt;
+    _vz += (mtz - z) * morphPull * dt;
+
     // Gravity toward center
     const dist = Math.sqrt(x * x + y * y + z * z) + 0.001;
-    const gravStr = 0.5 / (dist * 0.5 + 0.1);
+    const gravStr = 0.3 / (dist * 0.5 + 0.1);
     const dx = -x / dist, dy = -y / dist, dz = -z / dist;
     _vx += dx * gravStr * dt;
     _vy += dy * gravStr * dt;
-    _vz += dz * gravStr * dt * 0.5;
+    _vz += dz * gravStr * dt * 0.3;
 
     // Tangential orbital velocity
     const tgx = -dy, tgy = dx;
-    const orbSpeed = Math.sqrt(gravStr * dist) * 0.35;
-    _vx += tgx * orbSpeed * dt * 0.3;
-    _vy += tgy * orbSpeed * dt * 0.3;
+    const orbSpeed = Math.sqrt(gravStr * dist) * 0.3;
+    _vx += tgx * orbSpeed * dt * 0.25;
+    _vy += tgy * orbSpeed * dt * 0.25;
 
-    // Flatten toward disk
-    _vz -= z * 0.3 * dt;
+    _vz -= z * 0.15 * dt;
 
-    // Simple turbulence
+    // Turbulence (boosted by audio)
+    const turbulence = 0.3 + audioSparkle * 2.0;
     const n1 = noise3d(x * 0.7 + time * 0.1, y * 0.7, z * 0.7);
     const n2 = noise3d(y * 0.7, z * 0.7 + time * 0.1, x * 0.7);
     const n3 = noise3d(z * 0.7, x * 0.7, y * 0.7 + time * 0.1);
-    _vx += (n1 - 0.5) * 0.3 * dt;
-    _vy += (n2 - 0.5) * 0.3 * dt;
-    _vz += (n3 - 0.5) * 0.1 * dt;
+    _vx += (n1 - 0.5) * turbulence * dt;
+    _vy += (n2 - 0.5) * turbulence * dt;
+    _vz += (n3 - 0.5) * turbulence * 0.3 * dt;
+
+    // Audio pulsing — radial push/pull
+    if (audioEnergy > 0.05) {
+      const radialPush = (audioBass - 0.3) * 2.0;
+      _vx += dx * radialPush * dt * -0.5;
+      _vy += dy * radialPush * dt * -0.5;
+    }
 
     // Attractors
     for (let j = 0; j < MAX_ATTRACTORS; j++) {
@@ -363,26 +591,22 @@ function frame(now) {
         const aForce = a.strength * 6.0 / (aDist * aDist + 0.3);
         _vx += (adx / aDist) * aForce * dt;
         _vy += (ady / aDist) * aForce * dt;
-        // Swirl
         _vx += (-ady / aDist) * aForce * 0.3 * dt;
         _vy += (adx / aDist) * aForce * 0.3 * dt;
       }
     }
 
-    // Intro: pull toward target
     if (introT < 1.0) {
       const pullStr = (1.0 - introT) * 0.5;
-      _vx += (targetX[i] - x) * pullStr * dt;
-      _vy += (targetY[i] - y) * pullStr * dt;
-      _vz += (targetZ[i] - z) * pullStr * dt;
+      _vx += (morphTargetX[i] - x) * pullStr * dt;
+      _vy += (morphTargetY[i] - y) * pullStr * dt;
+      _vz += (morphTargetZ[i] - z) * pullStr * dt;
     }
 
-    // Damping
-    _vx *= 0.997;
-    _vy *= 0.997;
-    _vz *= 0.997;
+    _vx *= 0.996;
+    _vy *= 0.996;
+    _vz *= 0.996;
 
-    // Speed limit
     const speed = Math.sqrt(_vx * _vx + _vy * _vy + _vz * _vz);
     if (speed > 2.5) {
       const s = 2.5 / speed;
@@ -393,7 +617,6 @@ function frame(now) {
     y += _vy * dt;
     z += _vz * dt;
 
-    // Soft boundary (larger)
     const r = Math.sqrt(x * x + y * y + z * z);
     if (r > 7.0) {
       const s = 7.0 / r;
@@ -405,59 +628,56 @@ function frame(now) {
     vx[i] = _vx; vy[i] = _vy; vz[i] = _vz;
   }
 
-  // --- Render via ImageData for speed ---
-  const cx = width / 2;
-  const cy = height / 2;
-  const scale = Math.min(width, height) * 0.18; // bigger galaxy on screen
-  const hueShift = (time * 0.016) % 1.0;
-
-  // Clear pixel buffer to near-black
-  for (let i = 0; i < pixels.length; i++) {
-    pixels[i] = 0xFF080210; // ABGR: alpha=FF, B=08, G=02, R=10 → dark purple-black
+  // --- Update Comets ---
+  for (let c = comets.length - 1; c >= 0; c--) {
+    const comet = comets[c];
+    comet.life += dt;
+    if (comet.life > comet.maxLife) { comets.splice(c, 1); continue; }
+    comet.x += comet.vx * dt;
+    comet.y += comet.vy * dt;
+    comet.z += comet.vz * dt;
+    comet.trail.push({ x: comet.x, y: comet.y, z: comet.z, t: comet.life });
+    if (comet.trail.length > 40) comet.trail.shift();
   }
 
-  // Draw particles directly into pixel buffer (fastest possible)
+  // --- Render ---
+  const cx = width / 2;
+  const cy = height / 2;
+  const scale = Math.min(width, height) * 0.18;
+  const hueShift = (time * 0.016 + audioColorShift) % 1.0;
+  const brightBoost = 1.0 + audioEnergy * 1.5;
+
+  // Clear pixel buffer
+  for (let i = 0; i < pixels.length; i++) {
+    pixels[i] = 0xFF080210;
+  }
+
+  // Draw particles into pixel buffer
   for (let i = 0; i < NUM_PARTICLES; i++) {
     const x = px[i], y = py[i], z = pz[i];
-
-    // Rotate by camera angle
     const rx = x * cosA - z * sinA;
     const ry = y;
     const rz = x * sinA + z * cosA;
-
-    // Perspective projection
     const depth = rz + camDist;
     if (depth < 0.1) continue;
     const projScale = camDist / depth;
     const sx = (cx + rx * scale * projScale) | 0;
     const sy = (cy - ry * scale * projScale) | 0;
-
-    // Bounds check
     if (sx < 1 || sx >= width - 1 || sy < 1 || sy >= height - 1) continue;
 
-    // Age fade
     const ageFrac = age[i] / lifetime[i];
     const fadeMask = smoothstep(ageFrac * 8.0) * smoothstep((1.0 - ageFrac) * 4.0);
-
-    // Speed-based color
     const spd = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]);
     const colorT = Math.min(1, spd * 0.4 + (1.0 / depth) * 0.5);
     const [cr, cg, cb] = nebulaPalette(colorT, hueShift);
-
-    // Depth fog
     const fog = Math.exp(-depth * 0.04);
-
-    // Much brighter base alpha
-    const alpha = fadeMask * fog * (0.6 + spd * 0.4) * projScale;
-
+    const alpha = fadeMask * fog * (0.6 + spd * 0.4) * projScale * brightBoost;
     if (alpha < 0.02) continue;
 
     const a = Math.min(1, alpha);
     const ir = (cr * a) | 0;
     const ig = (cg * a) | 0;
     const ib = (cb * a) | 0;
-
-    // Additive blend into pixel buffer — write a 2x2 block for brighter, fatter stars
     const size = projScale > 0.8 ? 2 : 1;
 
     if (size === 2) {
@@ -465,64 +685,87 @@ function frame(now) {
         for (let dx = 0; dx < 2; dx++) {
           const pi = (sy + dy) * width + (sx + dx);
           const existing = pixels[pi];
-          const er = existing & 0xFF;
-          const eg = (existing >> 8) & 0xFF;
-          const eb = (existing >> 16) & 0xFF;
-          const nr = Math.min(255, er + ir);
-          const ng = Math.min(255, eg + ig);
-          const nb = Math.min(255, eb + ib);
-          pixels[pi] = 0xFF000000 | (nb << 16) | (ng << 8) | nr;
+          pixels[pi] = 0xFF000000 |
+            (Math.min(255, ((existing >> 16) & 0xFF) + ib) << 16) |
+            (Math.min(255, ((existing >> 8) & 0xFF) + ig) << 8) |
+            Math.min(255, (existing & 0xFF) + ir);
         }
       }
     } else {
       const pi = sy * width + sx;
       const existing = pixels[pi];
-      const er = existing & 0xFF;
-      const eg = (existing >> 8) & 0xFF;
-      const eb = (existing >> 16) & 0xFF;
-      const nr = Math.min(255, er + ir);
-      const ng = Math.min(255, eg + ig);
-      const nb = Math.min(255, eb + ib);
-      pixels[pi] = 0xFF000000 | (nb << 16) | (ng << 8) | nr;
+      pixels[pi] = 0xFF000000 |
+        (Math.min(255, ((existing >> 16) & 0xFF) + ib) << 16) |
+        (Math.min(255, ((existing >> 8) & 0xFF) + ig) << 8) |
+        Math.min(255, (existing & 0xFF) + ir);
     }
 
-    // Extra bright core for fast/close particles
     if (alpha > 0.5 && size === 2) {
       const pi = sy * width + sx;
       const existing = pixels[pi];
-      const er = existing & 0xFF;
-      const eg = (existing >> 8) & 0xFF;
-      const eb = (existing >> 16) & 0xFF;
       const boost = (alpha * 0.5) | 0;
-      const nr2 = Math.min(255, er + ir + boost * 2);
-      const ng2 = Math.min(255, eg + ig + boost * 2);
-      const nb2 = Math.min(255, eb + ib + boost);
-      pixels[pi] = 0xFF000000 | (nb2 << 16) | (ng2 << 8) | nr2;
+      pixels[pi] = 0xFF000000 |
+        (Math.min(255, ((existing >> 16) & 0xFF) + ib + boost) << 16) |
+        (Math.min(255, ((existing >> 8) & 0xFF) + ig + boost * 2) << 8) |
+        Math.min(255, (existing & 0xFF) + ir + boost * 2);
     }
   }
 
-  // Put pixels to main canvas
+  // --- Draw comets into pixel buffer ---
+  for (const comet of comets) {
+    const lifeFrac = comet.life / comet.maxLife;
+    const headBright = (1.0 - lifeFrac) * comet.brightness;
+
+    for (let t = 0; t < comet.trail.length; t++) {
+      const pt = comet.trail[t];
+      const trailFrac = t / comet.trail.length;
+      const rx = pt.x * cosA - pt.z * sinA;
+      const ry = pt.y;
+      const rz = pt.x * sinA + pt.z * cosA;
+      const depth = rz + camDist;
+      if (depth < 0.1) continue;
+      const projScale = camDist / depth;
+      const sx = (cx + rx * scale * projScale) | 0;
+      const sy = (cy - ry * scale * projScale) | 0;
+      if (sx < 2 || sx >= width - 2 || sy < 2 || sy >= height - 2) continue;
+
+      const bright = headBright * trailFrac * trailFrac;
+      const [cr, cg, cb] = nebulaPalette(0.7 + comet.hue * 0.3, hueShift);
+      const ir = Math.min(255, (cr * bright * 2.5) | 0);
+      const ig = Math.min(255, (cg * bright * 2.5) | 0);
+      const ib = Math.min(255, (cb * bright * 2.5) | 0);
+
+      // Draw 3x3 for head, smaller for trail
+      const sz = t > comet.trail.length * 0.7 ? 3 : (t > comet.trail.length * 0.3 ? 2 : 1);
+      for (let dy = 0; dy < sz; dy++) {
+        for (let dx = 0; dx < sz; dx++) {
+          const pi = (sy + dy) * width + (sx + dx);
+          if (pi < 0 || pi >= pixels.length) continue;
+          const existing = pixels[pi];
+          pixels[pi] = 0xFF000000 |
+            (Math.min(255, ((existing >> 16) & 0xFF) + ib) << 16) |
+            (Math.min(255, ((existing >> 8) & 0xFF) + ig) << 8) |
+            Math.min(255, (existing & 0xFF) + ir);
+        }
+      }
+    }
+  }
+
   ctx.putImageData(imgData, 0, 0);
 
-  // --- Glow pass: draw bright areas to glow canvas, then blur ---
+  // --- Glow pass ---
   const gW = glowCanvas.width;
   const gH = glowCanvas.height;
-  const gScaleX = gW / width;
-  const gScaleY = gH / height;
-
-  // Copy downscaled version to glow canvas
   glowCtx.clearRect(0, 0, gW, gH);
   glowCtx.drawImage(canvas, 0, 0, gW, gH);
 
-  // Composite blurred glow back additively
   ctx.globalCompositeOperation = 'lighter';
-
   ctx.filter = `blur(${Math.max(6, 12 * dpr)}px)`;
-  ctx.globalAlpha = 0.7;
+  ctx.globalAlpha = 0.7 + audioEnergy * 0.3;
   ctx.drawImage(glowCanvas, 0, 0, width, height);
 
   ctx.filter = `blur(${Math.max(12, 24 * dpr)}px)`;
-  ctx.globalAlpha = 0.4;
+  ctx.globalAlpha = 0.4 + audioBass * 0.4;
   ctx.drawImage(glowCanvas, 0, 0, width, height);
 
   ctx.filter = 'none';
@@ -537,15 +780,151 @@ function frame(now) {
   ctx.fillRect(0, 0, width, height);
 }
 
-// --- Start ---
 lastTime = 0;
 requestAnimationFrame(frame);
 
-// Fade in
 setTimeout(() => {
   document.getElementById('fade').classList.add('out');
   document.getElementById('overlay').classList.add('visible');
 }, 100);
+
+// ============================================================
+// VERIFICATION TESTS (run in console)
+// ============================================================
+window.__COSMOS_TESTS__ = {
+  runAll() {
+    const results = [];
+    const assert = (name, condition, detail) => {
+      results.push({ name, pass: !!condition, detail: detail || '' });
+    };
+
+    // === FEATURE 1: Shooting Stars ===
+    // Test 1.1: Comet spawning
+    const initialComets = comets.length;
+    spawnComet();
+    assert('F1.1 Comet spawns', comets.length === initialComets + 1,
+      `Before: ${initialComets}, After: ${comets.length}`);
+
+    // Test 1.2: Comet has required properties
+    const c = comets[comets.length - 1];
+    assert('F1.2 Comet properties', c.x !== undefined && c.y !== undefined && c.vx !== undefined &&
+      c.trail !== undefined && c.brightness > 0 && c.maxLife > 0,
+      `Has x,y,vx,trail,brightness,maxLife`);
+
+    // Test 1.3: Comet trail grows
+    const trailBefore = c.trail.length;
+    c.x += c.vx * 0.016; c.y += c.vy * 0.016;
+    c.trail.push({ x: c.x, y: c.y, z: c.z, t: 0 });
+    assert('F1.3 Trail grows', c.trail.length > trailBefore,
+      `Trail: ${trailBefore} → ${c.trail.length}`);
+
+    // Test 1.4: Meteor shower spawns multiple
+    const beforeShower = comets.length;
+    triggerMeteorShower();
+    setTimeout(() => {
+      assert('F1.4 Meteor shower', comets.length > beforeShower + 3,
+        `Before: ${beforeShower}, After: ${comets.length}`);
+    }, 2000);
+
+    // Test 1.5: Comets expire
+    const testComet = { x:0, y:0, z:0, vx:1, vy:0, vz:0, life:0, maxLife:0.01, trail:[], brightness:1, hue:0 };
+    comets.push(testComet);
+    const cometCountBefore = comets.length;
+    testComet.life = testComet.maxLife + 1;
+    // Next frame will clean it up
+    assert('F1.5 Comet expiry', testComet.life > testComet.maxLife,
+      `life=${testComet.life} > maxLife=${testComet.maxLife}`);
+
+    // === FEATURE 2: Audio Reactivity ===
+    // Test 2.1: Audio state exists
+    assert('F2.1 Audio state', typeof audioActive === 'boolean' &&
+      typeof audioBass === 'number' && typeof audioMid === 'number',
+      `active=${audioActive}, bass=${audioBass.toFixed(3)}`);
+
+    // Test 2.2: Audio button exists and toggles
+    const btn = document.getElementById('mic-btn');
+    assert('F2.2 Mic button exists', btn !== null, `Button: ${btn?.tagName}`);
+
+    // Test 2.3: Audio affects rendering when active
+    const savedBass = audioBass;
+    audioBass = 0.8;
+    const audioScaleTest = 1.0 + audioBass * 0.6;
+    assert('F2.3 Bass scales galaxy', audioScaleTest > 1.4,
+      `audioScale=${audioScaleTest.toFixed(2)} when bass=0.8`);
+    audioBass = savedBass;
+
+    // Test 2.4: Audio energy combines bands
+    const savedE = audioEnergy;
+    audioBass = 0.5; audioMid = 0.5; audioTreble = 0.5;
+    const testEnergy = (0.5 * 0.5 + 0.5 * 0.3 + 0.5 * 0.2);
+    assert('F2.4 Energy combines bands', Math.abs(testEnergy - 0.5) < 0.01,
+      `energy=${testEnergy.toFixed(3)}`);
+    audioBass = 0; audioMid = 0; audioTreble = 0; audioEnergy = savedE;
+
+    // Test 2.5: Bloom reacts to audio
+    const bloomAlpha = 0.7 + 0.8 * 0.3; // audioEnergy=0.8
+    assert('F2.5 Bloom reacts', bloomAlpha > 0.9,
+      `bloomAlpha=${bloomAlpha.toFixed(2)} with energy=0.8`);
+
+    // === FEATURE 3: Shape Morphing ===
+    // Test 3.1: Shape list exists
+    assert('F3.1 Shapes defined', SHAPES.length === 5 && SHAPES.includes('heart'),
+      `Shapes: ${SHAPES.join(', ')}`);
+
+    // Test 3.2: generateShapeTargets populates arrays
+    generateShapeTargets('heart');
+    let nonZero = 0;
+    for (let i = 0; i < 100; i++) {
+      if (morphTargetX[i] !== 0 || morphTargetY[i] !== 0) nonZero++;
+    }
+    assert('F3.2 Heart targets generated', nonZero > 90,
+      `${nonZero}/100 non-zero targets`);
+
+    // Test 3.3: Ring shape is circular
+    generateShapeTargets('ring');
+    let ringRadii = [];
+    for (let i = 0; i < 200; i++) {
+      ringRadii.push(Math.sqrt(morphTargetX[i]**2 + morphTargetY[i]**2));
+    }
+    const avgR = ringRadii.reduce((a,b) => a+b, 0) / ringRadii.length;
+    const variance = ringRadii.reduce((a,b) => a + (b-avgR)**2, 0) / ringRadii.length;
+    assert('F3.3 Ring is circular', avgR > 2 && avgR < 3 && variance < 0.5,
+      `avgRadius=${avgR.toFixed(2)}, variance=${variance.toFixed(3)}`);
+
+    // Test 3.4: Infinity shape has figure-8
+    generateShapeTargets('infinity');
+    let leftCount = 0, rightCount = 0;
+    for (let i = 0; i < NUM_PARTICLES; i++) {
+      if (morphTargetX[i] < -0.3) leftCount++;
+      if (morphTargetX[i] > 0.3) rightCount++;
+    }
+    assert('F3.4 Infinity has two lobes', leftCount > 1000 && rightCount > 1000,
+      `left=${leftCount}, right=${rightCount}`);
+
+    // Test 3.5: Morph progress works
+    morphProgress = 0;
+    const mp = smoothstep(0.5);
+    assert('F3.5 Morph smoothstep', mp > 0.4 && mp < 0.6,
+      `smoothstep(0.5)=${mp.toFixed(3)}`);
+
+    // Restore original shape
+    generateShapeTargets(SHAPES[currentShape]);
+    morphProgress = 1.0;
+
+    // Print results
+    console.log('%c=== COSMOS VERIFICATION TESTS ===', 'font-size:14px;font-weight:bold;color:#00d4ff');
+    let passed = 0, failed = 0;
+    for (const r of results) {
+      const icon = r.pass ? '✅' : '❌';
+      const style = r.pass ? 'color:#4f4' : 'color:#f44;font-weight:bold';
+      console.log(`${icon} %c${r.name}%c — ${r.detail}`, style, 'color:inherit');
+      r.pass ? passed++ : failed++;
+    }
+    console.log(`%c${passed} passed, ${failed} failed`, `font-weight:bold;color:${failed ? '#f44' : '#4f4'}`);
+    return { passed, failed, results };
+  }
+};
+console.log('Run window.__COSMOS_TESTS__.runAll() to execute verification tests');
 </script>
 </body>
 </html>
